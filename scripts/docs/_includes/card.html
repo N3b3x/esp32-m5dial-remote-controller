@@ -1,0 +1,71 @@
+{% comment %}
+  Card component for displaying content in a structured format
+  
+  Usage:
+  {% include card.html title="Card Title" content="Card content" %}
+  {% include card.html title="Card Title" content="Card content" footer="Card footer" %}
+  {% include card.html title="Card Title" content="Card content" type="featured" %}
+{% endcomment %}
+
+{% assign card_title = include.title %}
+{% assign card_content = include.content %}
+{% assign card_footer = include.footer %}
+{% assign card_type = include.type | default: "default" %}
+
+<div class="card card-{{ card_type }}">
+  {% if card_title %}
+    <div class="card-header">
+      <h3 class="card-title">{{ card_title }}</h3>
+    </div>
+  {% endif %}
+  
+  <div class="card-body">
+    {{ card_content }}
+  </div>
+  
+  {% if card_footer %}
+    <div class="card-footer">
+      {{ card_footer }}
+    </div>
+  {% endif %}
+</div>
+
+<style>
+.card {
+  background-color: #fff;
+  border: 1px solid #e1e5e9;
+  border-radius: 0.375rem;
+  margin: 1rem 0;
+  overflow: hidden;
+}
+
+.card-featured {
+  border-color: #007bff;
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 123, 255, 0.075);
+}
+
+.card-header {
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #e1e5e9;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #212529;
+}
+
+.card-body {
+  padding: 1rem;
+}
+
+.card-footer {
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-top: 1px solid #e1e5e9;
+  font-size: 0.875rem;
+  color: #6c757d;
+}
+</style>

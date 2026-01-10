@@ -1,0 +1,30 @@
+---
+layout: default
+---
+
+<div class="workflow-page">
+  {% if page.title %}
+    <h1 class="page-title">{{ page.title }}</h1>
+  {% endif %}
+  
+  {% if page.description %}
+    <div class="page-description">
+      <p>{{ page.description }}</p>
+    </div>
+  {% endif %}
+
+  <div class="workflow-content">
+    {{ content }}
+  </div>
+  
+  {% if page.related_workflows %}
+    <div class="related-workflows">
+      <h2>Related Workflows</h2>
+      <ul>
+        {% for workflow in page.related_workflows %}
+          <li><a href="{{ workflow.url }}">{{ workflow.title }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+</div>

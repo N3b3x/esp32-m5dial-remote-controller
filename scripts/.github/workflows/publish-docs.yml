@@ -1,0 +1,45 @@
+---
+name: 📚 Publish Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-with-doxygen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-docs:
+    uses: N3b3x/hf-general-ci-tools/.github/workflows/docs.yml@main
+    with:
+      # Jekyll configuration for this repo's docs
+      jekyll_enabled: true
+      jekyll_config: "docs/_config.yml"
+      jekyll_source: "."
+      jekyll_destination: "_site"
+      jekyll_layouts_dir: "docs/_layouts"
+
+      # Link checking
+      run_link_check: true
+      link_check_paths: "**/*.md"
+      verbose: true
+
+      # Markdown linting - false for now
+      run_markdown_lint: false
+      markdown_lint_paths: "**/*.md"
+
+      # Spell checking
+      run_spell_check: false
+      spell_check_paths: "**/*.md"
+
+      # Deploy to GitHub Pages
+      deploy_pages: true

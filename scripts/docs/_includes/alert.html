@@ -1,0 +1,64 @@
+{% comment %}
+  Alert component for displaying important information
+  
+  Usage:
+  {% include alert.html type="info" title="Note" content="This is important information" %}
+  {% include alert.html type="warning" content="Warning message" %}
+  {% include alert.html type="success" content="Success message" %}
+  {% include alert.html type="danger" content="Error message" %}
+{% endcomment %}
+
+{% assign alert_type = include.type | default: "info" %}
+{% assign alert_title = include.title %}
+{% assign alert_content = include.content | default: include %}
+
+<div class="alert alert-{{ alert_type }}" role="alert">
+  {% if alert_title %}
+    <h4 class="alert-heading">{{ alert_title }}</h4>
+  {% endif %}
+  <div class="alert-content">
+    {{ alert_content }}
+  </div>
+</div>
+
+<style>
+.alert {
+  padding: 1rem;
+  margin: 1rem 0;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+}
+
+.alert-info {
+  color: #0c5460;
+  background-color: #d1ecf1;
+  border-color: #bee5eb;
+}
+
+.alert-warning {
+  color: #856404;
+  background-color: #fff3cd;
+  border-color: #ffeaa7;
+}
+
+.alert-success {
+  color: #155724;
+  background-color: #d4edda;
+  border-color: #c3e6cb;
+}
+
+.alert-danger {
+  color: #721c24;
+  background-color: #f8d7da;
+  border-color: #f5c6cb;
+}
+
+.alert-heading {
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.alert-content {
+  margin: 0;
+}
+</style>

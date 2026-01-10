@@ -1,0 +1,13 @@
+# ESP32 Development and Security Scanning Requirements
+# Used by security workflows and development scripts
+
+# Core ESP32 development tools (used by security scanning)
+esptool>=4.0.0
+pyserial>=3.5
+
+# Configuration and data handling (used by generate_matrix.py, get_app_info.py)
+pyyaml>=6.0
+
+# ESP-IDF related tools (used by security scanning for comprehensive coverage)
+esp-idf-kconfig>=1.0.0
+esp-idf-size>=1.0.0

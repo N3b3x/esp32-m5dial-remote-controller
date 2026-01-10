@@ -1,0 +1,17 @@
+# Additional navigation items for HardFOC ESP-IDF Project Tools
+# Main navigation is automatically generated from page front matter
+
+- title: "GitHub Repository"
+  url: "https://github.com/n3b3x/hf-espidf-project-tools"
+  icon: "fab fa-github"
+  external: true
+
+- title: "Report Issues"
+  url: "https://github.com/n3b3x/hf-espidf-project-tools/issues"
+  icon: "fas fa-bug"
+  external: true
+
+- title: "Star on GitHub"
+  url: "https://github.com/n3b3x/hf-espidf-project-tools/stargazers"
+  icon: "fas fa-star"
+  external: true

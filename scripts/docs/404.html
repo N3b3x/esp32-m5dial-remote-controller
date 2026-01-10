@@ -1,0 +1,858 @@
+---
+layout: default
+title: "404 - Page Not Found"
+description: "The page you're looking for doesn't exist. Play the dinosaur game while you're here!"
+permalink: /404.html
+nav_exclude: true
+search_exclude: true
+---
+
+<style>
+  .error-container {
+    text-align: center;
+    padding: 2rem;
+    max-width: 800px;
+    margin: 0 auto;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  
+  .error-code {
+    font-size: 8rem;
+    font-weight: 900;
+    color: #2c3e50;
+    margin: 0;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+    background: linear-gradient(45deg, #3498db, #e74c3c);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  .error-message {
+    font-size: 1.5rem;
+    color: #7f8c8d;
+    margin: 1rem 0 2rem 0;
+    line-height: 1.6;
+  }
+  
+  .game-container {
+    background: #f8f9fa;
+    border-radius: 12px;
+    padding: 2rem;
+    margin: 2rem 0;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    border: 2px solid #e9ecef;
+  }
+  
+  .game-title {
+    font-size: 1.2rem;
+    color: #495057;
+    margin-bottom: 1rem;
+    font-weight: 600;
+  }
+  
+  .game-instructions {
+    font-size: 0.9rem;
+    color: #6c757d;
+    margin-bottom: 1rem;
+    font-style: italic;
+  }
+  
+  #dino-game {
+    width: 100%;
+    max-width: 600px;
+    height: 200px;
+    margin: 0 auto;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    background: #ffffff;
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .navigation-links {
+    margin-top: 2rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1rem;
+  }
+  
+  .nav-link {
+    display: inline-block;
+    padding: 0.75rem 1.5rem;
+    background: #007bff;
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 4px rgba(0,123,255,0.3);
+  }
+  
+  .nav-link:hover {
+    background: #0056b3;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,123,255,0.4);
+    text-decoration: none;
+    color: white;
+  }
+  
+  .nav-link.secondary {
+    background: #6c757d;
+    box-shadow: 0 2px 4px rgba(108,117,125,0.3);
+  }
+  
+  .nav-link.secondary:hover {
+    background: #545b62;
+    box-shadow: 0 4px 8px rgba(108,117,125,0.4);
+  }
+  
+  .fun-fact {
+    margin-top: 2rem;
+    padding: 1rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+  
+  .fun-fact strong {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+  }
+  
+  @media (max-width: 768px) {
+    .error-code {
+      font-size: 6rem;
+    }
+    
+    .error-message {
+      font-size: 1.2rem;
+    }
+    
+    .navigation-links {
+      flex-direction: column;
+      align-items: center;
+    }
+    
+    .nav-link {
+      width: 200px;
+      text-align: center;
+    }
+  }
+</style>
+
+<div class="error-container">
+  <h1 class="error-code">404</h1>
+  <p class="error-message">
+    Oops! The page you're looking for seems to have wandered off into the digital void.<br>
+    But don't worry – while you're here, why not play a game?
+  </p>
+  
+  <div class="game-container">
+    <h2 class="game-title">🦕 Dinosaur Adventure</h2>
+    <p class="game-instructions">
+      Press SPACE or click to jump over obstacles! See how far you can go.
+    </p>
+    <div id="dino-game"></div>
+  </div>
+  
+  <div class="navigation-links">
+    <a href="{{ '/' | relative_url }}" class="nav-link">🏠 Go Home</a>
+    <a href="{{ '/docs/' | relative_url }}" class="nav-link">📖 Documentation</a>
+    <a href="https://github.com/n3b3x/hf-espidf-ci-tools" class="nav-link secondary" target="_blank">🐙 GitHub</a>
+  </div>
+  
+  <div class="fun-fact">
+    <strong>💡 Did you know?</strong>
+    The Google Chrome dinosaur game was created in 2014 and has been played over 270 million times! 
+    It's one of the most popular offline games ever created.
+  </div>
+</div>
+
+<script>
+  // Enhanced Dinosaur Game Implementation
+  (function() {
+    let gameContainer = document.getElementById('dino-game');
+    if (!gameContainer) return;
+    
+    // Create game canvas
+    let canvas = document.createElement('canvas');
+    canvas.width = gameContainer.offsetWidth;
+    canvas.height = gameContainer.offsetHeight;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    gameContainer.appendChild(canvas);
+    
+    let ctx = canvas.getContext('2d');
+    let gameRunning = false;
+    let score = 0;
+    let highScore = localStorage.getItem('dino-high-score') || 0;
+    
+    // Game objects
+    let dino = {
+      x: 50,
+      y: canvas.height - 60, // Adjusted to touch ground properly
+      width: 40,
+      height: 40,
+      velocityY: 0,
+      grounded: true,
+      color: '#2c3e50',
+      jumpPower: -12, // Balanced jump power
+      gravity: 0.7,   // Reduced gravity for better control
+      maxFallSpeed: 10, // Terminal velocity
+      animationFrame: 0, // For running animation
+      legOffset: 0 // For leg movement
+    };
+    
+    let obstacles = [];
+    let clouds = [];
+    
+    // Game state
+    let gameSpeed = 6; // Increased base speed for faster gameplay
+    let obstacleTimer = 0;
+    let cloudTimer = 0;
+    let speedIncreaseTimer = 0;
+    let lastScore = 0; // Track score changes for visual feedback
+    let showScorePopup = false; // For top page score indicator
+    let scorePopupTimer = 0; // Timer for score popup
+    let selectedDinoType = 0; // Selected dinosaur type
+    let showDinoSelection = false; // Show dinosaur selection screen
+    let showPickDinoButton = false; // Show pick dino button during game
+    let isGameOver = false; // Track if game is over
+    let dinoSelectionIndex = 0; // Current selection index for keyboard navigation
+    
+    // Background scrolling
+    let backgroundOffset = 0;
+    let groundOffset = 0;
+    
+    // Input handling
+    let keys = {};
+    let jumpPressed = false;
+    
+    // Keyboard events
+    document.addEventListener('keydown', function(e) {
+      if (showDinoSelection) {
+        // Handle dinosaur selection navigation
+        if (e.code === 'ArrowLeft') {
+          e.preventDefault();
+          dinoSelectionIndex = Math.max(0, dinoSelectionIndex - 1);
+        } else if (e.code === 'ArrowRight') {
+          e.preventDefault();
+          dinoSelectionIndex = Math.min(dinoTypes.length - 1, dinoSelectionIndex + 1);
+        } else if (e.code === 'Enter') {
+          e.preventDefault();
+          selectedDinoType = dinoSelectionIndex;
+          showDinoSelection = false;
+        } else if (e.code === 'Escape') {
+          e.preventDefault();
+          showDinoSelection = false;
+        }
+        return;
+      }
+      
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (!jumpPressed) {
+          jumpPressed = true;
+          if (!gameRunning) {
+            startGame();
+          } else {
+            jump();
+          }
+        }
+      }
+    });
+    
+    document.addEventListener('keyup', function(e) {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        jumpPressed = false;
+      }
+    });
+    
+    // Mouse events - mousedown for immediate response
+    gameContainer.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      
+      if (showDinoSelection) {
+        // Handle dinosaur selection
+        const dinoSpacing = 80;
+        const startX = (canvas.width - (dinoTypes.length * dinoSpacing)) / 2;
+        const dinoY = canvas.height / 2 - 20;
+        
+        for (let i = 0; i < dinoTypes.length; i++) {
+          const dinoX = startX + i * dinoSpacing;
+          // Updated click area to match the larger selection square (80x80)
+          if (x >= dinoX - 40 && x <= dinoX + 40 && y >= dinoY - 40 && y <= dinoY + 40) {
+            selectedDinoType = i;
+            dinoSelectionIndex = i; // Update selection index for keyboard navigation
+            showDinoSelection = false;
+            // Don't auto-start game, let user click start
+            return;
+          }
+        }
+        
+      } else if (!gameRunning && !showDinoSelection) {
+        // Check if click is on pick dino button (start screen or game over screen)
+        const buttonX = canvas.width - 120;
+        const buttonY = 10;
+        const buttonWidth = 100;
+        const buttonHeight = 30;
+        
+        if (x >= buttonX && x <= buttonX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
+          // Show dino selection
+          showDinoSelection = true;
+          dinoSelectionIndex = selectedDinoType; // Initialize selection index to current selection
+          return;
+        }
+      }
+      
+      if (!jumpPressed) {
+        jumpPressed = true;
+        if (!gameRunning && !showDinoSelection) {
+          if (isGameOver) {
+            // Reset game over state and go to start screen
+            isGameOver = false;
+          } else {
+            startGame();
+          }
+        } else if (gameRunning) {
+          jump();
+        }
+      }
+    });
+    
+    gameContainer.addEventListener('mouseup', function(e) {
+      e.preventDefault();
+      jumpPressed = false;
+    });
+    
+    // Touch events for mobile
+    gameContainer.addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      if (!jumpPressed) {
+        jumpPressed = true;
+        if (!gameRunning) {
+          startGame();
+        } else {
+          jump();
+        }
+      }
+    });
+    
+    gameContainer.addEventListener('touchend', function(e) {
+      e.preventDefault();
+      jumpPressed = false;
+    });
+    
+    // Dinosaur types
+    const dinoTypes = [
+      { name: "Classic", color: '#2c3e50', headColor: '#34495e', eyeColor: '#fff' },
+      { name: "Green", color: '#27ae60', headColor: '#2ecc71', eyeColor: '#fff' },
+      { name: "Red", color: '#e74c3c', headColor: '#c0392b', eyeColor: '#fff' },
+      { name: "Blue", color: '#3498db', headColor: '#2980b9', eyeColor: '#fff' },
+      { name: "Purple", color: '#9b59b6', headColor: '#8e44ad', eyeColor: '#fff' },
+      { name: "Orange", color: '#f39c12', headColor: '#e67e22', eyeColor: '#fff' }
+    ];
+    
+    // Draw pick dino button
+    function drawPickDinoButton(ctx) {
+      const buttonX = canvas.width - 120;
+      const buttonY = 10;
+      const buttonWidth = 100;
+      const buttonHeight = 35;
+      
+      // Button background with gradient effect
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillRect(buttonX, buttonY, buttonWidth, buttonHeight);
+      
+      // Button border
+      ctx.strokeStyle = '#c0392b';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(buttonX, buttonY, buttonWidth, buttonHeight);
+      
+      // Button text
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 14px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('🦕 Pick Dino', buttonX + buttonWidth/2, buttonY + 22);
+    }
+    
+    // Drawing functions for better graphics
+    function drawDino(ctx, dino, dinoType = 0) {
+      const type = dinoTypes[dinoType] || dinoTypes[0];
+      
+      // Dino body
+      ctx.fillStyle = type.color;
+      ctx.fillRect(dino.x, dino.y, dino.width, dino.height);
+      
+      // Head bobbing animation when running
+      let headBob = 0;
+      if (dino.grounded && gameRunning) {
+        headBob = Math.sin(dino.animationFrame * 2) * 1;
+      }
+      
+      // Dino head
+      ctx.fillStyle = type.headColor;
+      ctx.fillRect(dino.x + 25, dino.y - 10 + headBob, 15, 15);
+      
+      // Dino eye
+      ctx.fillStyle = type.eyeColor;
+      ctx.fillRect(dino.x + 30, dino.y - 5 + headBob, 5, 5);
+      
+      // Dino snout
+      ctx.fillStyle = type.headColor;
+      ctx.fillRect(dino.x + 40, dino.y - 2 + headBob, 8, 6);
+      
+      // Dino tail
+      ctx.fillStyle = type.color;
+      ctx.fillRect(dino.x - 10, dino.y + 20, 15, 8);
+      
+      // Running animation for legs
+      if (dino.grounded && gameRunning) {
+        dino.animationFrame += 0.3;
+        dino.legOffset = Math.sin(dino.animationFrame) * 3;
+      } else {
+        dino.legOffset = 0;
+      }
+      
+      // Dino legs with animation
+      ctx.fillStyle = type.headColor;
+      const leftLegY = dino.y + 35 + dino.legOffset;
+      const rightLegY = dino.y + 35 - dino.legOffset;
+      
+      ctx.fillRect(dino.x + 5, leftLegY, 8, 10);
+      ctx.fillRect(dino.x + 20, rightLegY, 8, 10);
+      
+      // Dino feet
+      ctx.fillStyle = '#1a252f';
+      ctx.fillRect(dino.x + 4, leftLegY + 8, 10, 4);
+      ctx.fillRect(dino.x + 19, rightLegY + 8, 10, 4);
+      
+      // Dino belly
+      ctx.fillStyle = type.headColor;
+      ctx.fillRect(dino.x + 5, dino.y + 10, 30, 15);
+      
+      // Dino spikes on back
+      ctx.fillStyle = '#1a252f';
+      for (let i = 0; i < 3; i++) {
+        const spikeX = dino.x + 10 + i * 8;
+        const spikeY = dino.y - 5;
+        ctx.fillRect(spikeX, spikeY, 4, 8);
+      }
+    }
+    
+    function drawObstacle(ctx, obstacle) {
+      // Cactus body
+      ctx.fillStyle = obstacle.color;
+      ctx.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
+      
+      // Cactus arms
+      if (obstacle.width > 20) {
+        ctx.fillRect(obstacle.x - 5, obstacle.y + 10, 8, 15);
+        ctx.fillRect(obstacle.x + obstacle.width - 3, obstacle.y + 15, 8, 12);
+      }
+      
+      // Cactus spikes
+      ctx.fillStyle = '#27ae60';
+      for (let i = 0; i < obstacle.height; i += 8) {
+        ctx.fillRect(obstacle.x + 2, obstacle.y + i, 2, 2);
+        ctx.fillRect(obstacle.x + obstacle.width - 4, obstacle.y + i, 2, 2);
+      }
+    }
+    
+    function drawBackground(ctx) {
+      // Sky gradient
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#87CEEB');
+      gradient.addColorStop(1, '#E0F6FF');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Mountains in background
+      ctx.fillStyle = '#A8A8A8';
+      for (let i = 0; i < 5; i++) {
+        const x = (backgroundOffset + i * canvas.width) % (canvas.width * 3);
+        const height = 80 + i * 15;
+        const width = 200;
+        
+        // Only draw if the mountain is at least partially visible
+        if (x + width > 0 && x < canvas.width) {
+          ctx.beginPath();
+          ctx.moveTo(x, canvas.height - height);
+          ctx.lineTo(x + width/2, canvas.height - height - 30);
+          ctx.lineTo(x + width, canvas.height - height);
+          ctx.lineTo(x + width, canvas.height);
+          ctx.lineTo(x, canvas.height);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      
+      // Ground with texture
+      ctx.fillStyle = '#95a5a6';
+      ctx.fillRect(0, canvas.height - 20, canvas.width, 20);
+      
+      // Ground pattern for scrolling effect
+      ctx.fillStyle = '#7f8c8d';
+      for (let x = groundOffset; x < canvas.width + 20; x += 20) {
+        ctx.fillRect(x, canvas.height - 20, 10, 5);
+        ctx.fillRect(x + 10, canvas.height - 15, 10, 5);
+      }
+      
+      // Ground line
+      ctx.strokeStyle = '#6c7b7d';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height - 20);
+      ctx.lineTo(canvas.width, canvas.height - 20);
+      ctx.stroke();
+    }
+    
+    // Game functions
+    function jump() {
+      if (dino.grounded) {
+        dino.velocityY = dino.jumpPower;
+        dino.grounded = false;
+      }
+    }
+    
+    function updateDino() {
+      if (!dino.grounded) {
+        // Apply gravity
+        dino.velocityY += dino.gravity;
+        
+        // Limit fall speed (terminal velocity)
+        if (dino.velocityY > dino.maxFallSpeed) {
+          dino.velocityY = dino.maxFallSpeed;
+        }
+        
+        // Update position
+        dino.y += dino.velocityY;
+        
+        // Ground collision
+        if (dino.y >= canvas.height - 60) {
+          dino.y = canvas.height - 60;
+          dino.velocityY = 0;
+          dino.grounded = true;
+        }
+      }
+    }
+    
+    function createObstacle() {
+      // Create obstacles with better spacing and variety
+      const obstacleTypes = [
+        { width: 20, height: 40, color: '#e74c3c', y: canvas.height - 40 }, // Small cactus
+        { width: 15, height: 30, color: '#c0392b', y: canvas.height - 30 }, // Medium cactus
+        { width: 25, height: 50, color: '#8e44ad', y: canvas.height - 50 }  // Large cactus
+      ];
+      
+      const obstacle = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+      obstacles.push({
+        x: canvas.width,
+        y: obstacle.y,
+        width: obstacle.width,
+        height: obstacle.height,
+        color: obstacle.color
+      });
+    }
+    
+    function createCloud() {
+      clouds.push({
+        x: canvas.width,
+        y: Math.random() * (canvas.height / 2),
+        width: 30,
+        height: 20,
+        speed: 1
+      });
+    }
+    
+    function updateObstacles() {
+      obstacles.forEach((obstacle, index) => {
+        // Balanced obstacle speed - slightly faster than base speed
+        obstacle.x -= gameSpeed * 1.2; // 20% faster than base speed for better balance
+        
+        // Check if dino successfully jumped over obstacle
+        if (obstacle.x + obstacle.width < dino.x && !obstacle.scored) {
+          obstacle.scored = true; // Mark as scored to prevent double scoring
+          score += 10; // Points for successful jump
+          showScorePopup = true; // Show score popup at top
+          scorePopupTimer = 60; // Show for 1 second
+        }
+        
+        // Remove obstacle when it's off screen
+        if (obstacle.x + obstacle.width < 0) {
+          obstacles.splice(index, 1);
+        }
+      });
+    }
+    
+    function updateClouds() {
+      clouds.forEach((cloud, index) => {
+        cloud.x -= cloud.speed;
+        if (cloud.x + cloud.width < 0) {
+          clouds.splice(index, 1);
+        }
+      });
+    }
+    
+    function updateBackground() {
+      // Update background scrolling
+      backgroundOffset -= gameSpeed * 0.5; // Background moves slower than foreground
+      if (backgroundOffset <= -canvas.width) {
+        backgroundOffset = 0;
+      }
+      
+      // Update ground scrolling
+      groundOffset -= gameSpeed;
+      if (groundOffset <= -canvas.width) {
+        groundOffset = 0;
+      }
+    }
+    
+    function checkCollisions() {
+      obstacles.forEach(obstacle => {
+        if (dino.x < obstacle.x + obstacle.width &&
+            dino.x + dino.width > obstacle.x &&
+            dino.y < obstacle.y + obstacle.height &&
+            dino.y + dino.height > obstacle.y) {
+          endGame();
+        }
+      });
+    }
+    
+    function endGame() {
+      gameRunning = false;
+      isGameOver = true;
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('dino-high-score', highScore);
+      }
+    }
+    
+    function startGame() {
+      gameRunning = true;
+      isGameOver = false;
+      score = 0;
+      obstacles = [];
+      clouds = [];
+      dino.y = canvas.height - 60;
+      dino.velocityY = 0;
+      dino.grounded = true;
+      gameSpeed = 6;
+      showPickDinoButton = false; // Hide pick dino button during game
+    }
+    
+    function draw() {
+      // Draw score popup at top of page
+      if (showScorePopup && scorePopupTimer > 0) {
+        scorePopupTimer--;
+        if (scorePopupTimer <= 0) {
+          showScorePopup = false;
+        }
+      }
+      
+      if (showDinoSelection) {
+        // Draw dinosaur selection screen
+        drawBackground(ctx);
+        
+        // Title
+        ctx.fillStyle = '#2c3e50';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('Choose Your Dinosaur!', canvas.width / 2, 60);
+        
+        // Draw dinosaur options
+        const dinoSpacing = 80;
+        const startX = (canvas.width - (dinoTypes.length * dinoSpacing)) / 2;
+        
+        for (let i = 0; i < dinoTypes.length; i++) {
+          const x = startX + i * dinoSpacing;
+          const y = canvas.height / 2 - 20;
+          
+          // Draw selection box (large enough to fully encompass the dinosaur)
+          if (i === dinoSelectionIndex) {
+            ctx.strokeStyle = '#27ae60';
+            ctx.lineWidth = 6;
+            ctx.strokeRect(x - 40, y - 15, 80, 80);
+            
+            // Add a subtle glow effect
+            ctx.strokeStyle = '#2ecc71';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x - 42, y - 17, 84, 84);
+          }
+          
+          // Draw dinosaur
+          const previewDino = { x: x - 20, y: y, width: 40, height: 40 };
+          drawDino(ctx, previewDino, i);
+          
+          // Draw name
+          ctx.fillStyle = '#2c3e50';
+          ctx.font = '12px Arial';
+          ctx.fillText(dinoTypes[i].name, x, y + 60);
+        }
+        
+        // Instructions
+        ctx.fillStyle = '#7f8c8d';
+        ctx.font = '16px Arial';
+        ctx.fillText('Use ARROW KEYS to navigate, ENTER to select', canvas.width / 2, canvas.height / 2 + 100);
+        ctx.fillText('Or click on a dinosaur to select it', canvas.width / 2, canvas.height / 2 + 125);
+        
+        ctx.fillStyle = '#95a5a6';
+        ctx.font = '14px Arial';
+        ctx.fillText('Then press SPACE or click to start!', canvas.width / 2, canvas.height / 2 + 150);
+        return;
+      }
+      
+      if (!gameRunning) {
+        if (isGameOver) {
+          // Draw game over screen
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 32px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText('Game Over!', canvas.width / 2, canvas.height / 2 - 40);
+          
+          ctx.font = '20px Arial';
+          ctx.fillText(`Score: ${score}`, canvas.width / 2, canvas.height / 2 + 5);
+          ctx.fillText(`High Score: ${highScore}`, canvas.width / 2, canvas.height / 2 + 30);
+          
+          ctx.font = '16px Arial';
+          ctx.fillStyle = '#bdc3c7';
+          ctx.fillText('Press SPACE or click to restart', canvas.width / 2, canvas.height / 2 + 70);
+          
+          // Draw pick dino button on game over screen
+          drawPickDinoButton(ctx);
+        } else {
+          // Draw static background for start screen
+          drawBackground(ctx);
+          
+          // Draw start screen
+          ctx.fillStyle = '#2c3e50';
+          ctx.font = 'bold 20px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText('Press SPACE or click to start!', canvas.width / 2, canvas.height / 2 - 40);
+          
+          // Draw a preview dino
+          const previewDino = {
+            x: canvas.width / 2 - 20,
+            y: canvas.height / 2 - 10,
+            width: 40,
+            height: 40
+          };
+          drawDino(ctx, previewDino, selectedDinoType);
+          
+          // Draw instructions
+          ctx.fillStyle = '#7f8c8d';
+          ctx.font = '14px Arial';
+          ctx.fillText('Click anywhere on the game area!', canvas.width / 2, canvas.height / 2 + 60);
+          
+          // Draw pick dino button on start screen
+          drawPickDinoButton(ctx);
+        }
+        
+        // Draw controls (only on start screen, not game over)
+        if (!isGameOver) {
+          ctx.fillStyle = '#95a5a6';
+          ctx.font = '12px Arial';
+          ctx.fillText('SPACE or Click to jump • Avoid the cacti!', canvas.width / 2, canvas.height / 2 + 80);
+        }
+        return;
+      }
+      
+      // Draw scrolling background
+      drawBackground(ctx);
+      
+      // Draw clouds
+      ctx.fillStyle = '#ecf0f1';
+      clouds.forEach(cloud => {
+        ctx.fillRect(cloud.x, cloud.y, cloud.width, cloud.height);
+      });
+      
+      // Draw dino with better graphics
+      drawDino(ctx, dino, selectedDinoType);
+      
+      // Draw obstacles with better graphics
+      obstacles.forEach(obstacle => {
+        drawObstacle(ctx, obstacle);
+      });
+      
+      // Draw score popup at top of page
+      if (showScorePopup) {
+        ctx.fillStyle = '#27ae60';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('+10 Jump!', canvas.width / 2, 40);
+      }
+      
+      // Draw score
+      ctx.fillStyle = '#2c3e50';
+      ctx.font = '16px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Score: ${score}`, 10, 30);
+      ctx.fillText(`High Score: ${highScore}`, 10, 50);
+      
+      // Pick dino buttons are now drawn directly in each screen (start screen and game over screen)
+    }
+    
+    function gameLoop() {
+      if (gameRunning) {
+        updateDino();
+        updateObstacles();
+        updateClouds();
+        updateBackground(); // Add background scrolling
+        checkCollisions();
+        
+        // Create obstacles with better timing
+        obstacleTimer++;
+        const obstacleInterval = Math.max(60, 120 - gameSpeed * 5); // Balanced obstacle generation
+        if (obstacleTimer > obstacleInterval) {
+          createObstacle();
+          obstacleTimer = 0;
+        }
+        
+        // Create clouds
+        cloudTimer++;
+        if (cloudTimer > 150) {
+          createCloud();
+          cloudTimer = 0;
+        }
+        
+        // Progressive speed increase
+        speedIncreaseTimer++;
+        if (speedIncreaseTimer > 240) { // Every 4 seconds at 60fps
+          gameSpeed += 0.3; // Faster speed increase
+          speedIncreaseTimer = 0;
+        }
+        
+        // Small time-based bonus (survival points)
+        if (speedIncreaseTimer % 60 === 0) { // Every second
+          score += 1; // Small survival bonus
+        }
+      }
+      
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+    
+    // Start the game
+    gameLoop();
+    
+    // Handle window resize
+    window.addEventListener('resize', function() {
+      canvas.width = gameContainer.offsetWidth;
+      canvas.height = gameContainer.offsetHeight;
+    });
+  })();
+</script>

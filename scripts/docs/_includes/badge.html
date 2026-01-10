@@ -1,0 +1,71 @@
+{% comment %}
+  Badge component for displaying status indicators
+  
+  Usage:
+  {% include badge.html text="New" type="success" %}
+  {% include badge.html text="Deprecated" type="warning" %}
+  {% include badge.html text="Required" type="danger" %}
+  {% include badge.html text="Optional" type="info" %}
+{% endcomment %}
+
+{% assign badge_text = include.text %}
+{% assign badge_type = include.type | default: "default" %}
+{% assign badge_size = include.size | default: "normal" %}
+
+<span class="badge badge-{{ badge_type }} badge-{{ badge_size }}">{{ badge_text }}</span>
+
+<style>
+.badge {
+  display: inline-block;
+  padding: 0.25em 0.4em;
+  font-size: 0.75em;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  vertical-align: baseline;
+  border-radius: 0.25rem;
+  margin: 0 0.25rem;
+}
+
+.badge-small {
+  font-size: 0.65em;
+  padding: 0.2em 0.3em;
+}
+
+.badge-large {
+  font-size: 0.85em;
+  padding: 0.35em 0.5em;
+}
+
+.badge-default {
+  color: #212529;
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+}
+
+.badge-success {
+  color: #fff;
+  background-color: #28a745;
+}
+
+.badge-warning {
+  color: #212529;
+  background-color: #ffc107;
+}
+
+.badge-danger {
+  color: #fff;
+  background-color: #dc3545;
+}
+
+.badge-info {
+  color: #fff;
+  background-color: #17a2b8;
+}
+
+.badge-primary {
+  color: #fff;
+  background-color: #007bff;
+}
+</style>

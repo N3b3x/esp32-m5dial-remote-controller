@@ -1,0 +1,43 @@
+# ESP32-S3 M5Stack Dial Remote Controller - Apps Configuration
+
+version: "1.0"
+metadata:
+  project: "ESP32-S3 M5Stack Dial Remote Controller"
+  default_app: "m5dial_remote_controller"
+  target: "esp32s3"
+  idf_versions: ["release/v5.5", "release/v5.4"]
+  build_types: [["Debug", "Release"], ["Debug"]]
+
+apps:
+  m5dial_remote_controller:
+    description: "M5Stack Dial remote controller for fatigue test unit (ESP-NOW + touch + encoder UI)"
+    source_file: "main/main.cpp"
+    category: "remote_control"
+    idf_versions: ["release/v5.5"]
+    build_types: ["Debug", "Release"]
+    ci_enabled: false
+    featured: true
+
+build_config:
+  build_types:
+    Debug:
+      description: "Debug symbols, verbose logging, assertions enabled"
+      cmake_build_type: "Debug"
+      optimization: "-O0"
+      debug_level: "-g3"
+      defines: ["DEBUG"]
+    Release:
+      description: "Release build optimized for performance and size"
+      cmake_build_type: "Release"
+      optimization: "-O2"
+      debug_level: "-g0"
+      defines: ["NDEBUG"]
+
+  build_directory_pattern: "build-app-{app_type}-type-{build_type}-target-{target}-idf-{idf_version}"
+  project_name_pattern: "esp32_m5dial_remote_controller_{app_type}_app"
+
+ci_config:
+  timeout_minutes: 30
+  fail_fast: false
+  exclude_combinations: []
+  special_apps: []

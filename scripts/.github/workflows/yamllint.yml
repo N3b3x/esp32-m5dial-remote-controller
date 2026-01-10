@@ -1,0 +1,19 @@
+---
+name: 📚 YAML Lint
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  yamllint:
+    name: YAML Lint
+    uses: N3b3x/hf-general-ci-tools/.github/workflows/yamllint-reusable.yml@main
+    with:
+      paths: '.github/workflows/*.yml,**/*.yml,**/*.yaml'
+      config_file: '.yamllint'
+      strict_mode: true
+      exclude_patterns: '.git/**,node_modules/**,venv/**,.venv/**,_site/**'

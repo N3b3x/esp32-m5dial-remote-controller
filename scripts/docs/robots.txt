@@ -1,0 +1,99 @@
+# Robots.txt for hf-general-ci-tools documentation
+# https://n3b3x.github.io/hf-general-ci-tools/
+
+# Allow all web crawlers
+User-agent: *
+
+# Allow access to all public content
+Allow: /
+
+# Disallow access to private/administrative areas
+Disallow: /admin/
+Disallow: /private/
+Disallow: /drafts/
+Disallow: /_layouts/
+Disallow: /_includes/
+Disallow: /_sass/
+Disallow: /_config*
+Disallow: /.github/
+Disallow: /node_modules/
+Disallow: /vendor/
+Disallow: /build/
+Disallow: /dist/
+Disallow: /tmp/
+Disallow: /.git/
+Disallow: /.vscode/
+Disallow: /.idea/
+
+# Disallow access to specific file types that shouldn't be indexed
+Disallow: /*.log$
+Disallow: /*.tmp$
+Disallow: /*.bak$
+Disallow: /*.swp$
+Disallow: /*.swo$
+Disallow: /*~
+Disallow: /.*$
+
+# Allow access to important documentation files
+Allow: /*.md$
+Allow: /*.html$
+Allow: /*.css$
+Allow: /*.js$
+Allow: /*.png$
+Allow: /*.jpg$
+Allow: /*.jpeg$
+Allow: /*.gif$
+Allow: /*.svg$
+Allow: /*.ico$
+Allow: /*.pdf$
+
+# Crawl delay (be respectful to the server)
+Crawl-delay: 1
+
+# Sitemap location
+Sitemap: https://n3b3x.github.io/hf-general-ci-tools/sitemap.xml
+
+# Additional sitemaps (if available)
+# Sitemap: https://n3b3x.github.io/hf-general-ci-tools/sitemap-pages.xml
+# Sitemap: https://n3b3x.github.io/hf-general-ci-tools/sitemap-posts.xml
+
+# Special instructions for specific bots
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Slurp
+Allow: /
+Crawl-delay: 2
+
+User-agent: DuckDuckBot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Baiduspider
+Allow: /
+Crawl-delay: 2
+
+User-agent: YandexBot
+Allow: /
+Crawl-delay: 2
+
+# Block problematic bots
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+# Host directive (helps with duplicate content issues)
+Host: https://n3b3x.github.io

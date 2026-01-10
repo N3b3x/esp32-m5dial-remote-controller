@@ -1,0 +1,186 @@
+---
+# Jekyll configuration for hf-espidf-project-tools documentation
+title: "HardFOC ESP-IDF Project Tools"
+description: >
+  Development Scripts for ESP-IDF projects with multi-application build support.
+baseurl: "/hf-espidf-project-tools"  # GitHub Pages subpath
+url: "https://n3b3x.github.io"
+
+# Author and social information
+author:
+  name: "N3b3x"
+  email: "n3b3x@example.com"
+  url: "https://github.com/n3b3x"
+
+# Directory configuration
+includes_dir: docs/_includes
+layouts_dir: docs/_layouts
+sass:
+  sass_dir: docs/_sass
+
+# Theme and plugins
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+  - jekyll-seo-tag
+  - jekyll-remote-theme
+  - jekyll-redirect-from
+  - jekyll-optional-front-matter
+
+# Navigation settings
+nav_next_prev: true
+
+# Markdown and syntax highlighting
+markdown: kramdown
+highlighter: rouge
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: 'highlight'
+    span:
+      line_numbers: false
+    block:
+      line_numbers: true
+      start_line: 1
+
+# Site settings
+timezone: UTC
+encoding: utf-8
+lang: en
+
+# Just the Docs configuration
+search_enabled: true
+search:
+  heading_level: 3
+  previews: 5
+  preview_words_before: 10
+  preview_words_after: 15
+  tokenizer_separator: /[\s/]+/
+  rel_url: true
+  button: true
+
+# Navigation and UI enhancements
+nav_enabled: true
+heading_anchors: true
+breadcrumbs: true
+toc:
+  min_level: 2
+  max_level: 6
+
+# Callouts for better content presentation
+callouts:
+  note:
+    title: Note
+    color: blue
+  warning:
+    title: Warning
+    color: yellow
+  tip:
+    title: Tip
+    color: green
+  important:
+    title: Important
+    color: red
+
+# Visual enhancements
+color_scheme: dark
+toggle_color_scheme: true
+toggle_auto_mode: true
+
+# Auxiliary links with better organization
+aux_links:
+  "📚 GitHub Repository":
+    - "https://github.com/n3b3x/hf-espidf-project-tools"
+  "🐛 Report Issues":
+    - "https://github.com/n3b3x/hf-espidf-project-tools/issues"
+  "⭐ Star on GitHub":
+    - "https://github.com/n3b3x/hf-espidf-project-tools/stargazers"
+
+# Footer customization
+footer_content: >
+  Built with ❤️ using <a href='https://just-the-docs.github.io/just-the-docs/'>Just the Docs</a> •
+  <a href='https://github.com/n3b3x/hf-espidf-project-tools/blob/main/LICENSE'>MIT License</a> •
+  <a href='https://github.com/n3b3x/hf-espidf-project-tools'>View on GitHub</a>
+
+# Collections for better organization
+collections:
+  docs:
+    permalink: "/:collection/:path/"
+    output: true
+    sort_by: nav_order
+
+# Just the Docs configuration
+just_the_docs:
+  # Navigation configuration
+  nav_fold: true
+  nav_external_links:
+    - title: "📚 GitHub Repository"
+      url: https://github.com/n3b3x/hf-espidf-project-tools
+    - title: "🐛 Issues"
+      url: https://github.com/n3b3x/hf-espidf-project-tools/issues
+
+  # Custom head content
+  head_custom: _includes/head_custom.html
+
+  # Custom CSS and JS
+  custom_css:
+    - docs/assets/css/custom.css
+  custom_js:
+    - docs/assets/js/custom.js
+
+# Exclude files from processing
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - .git
+  - .github
+  - "*.gem"
+  - "*.gemspec"
+  - .sass-cache
+  - .jekyll-cache
+  - .jekyll-metadata
+
+# Include files that are normally excluded
+include:
+  - docs/_pages
+  - ../README.md
+  - ../LICENSE
+  - docs/assets/
+
+# Enhanced SEO settings
+seo:
+  type: "Organization"
+  name: "HardFOC ESP-IDF Project Tools"
+  description: >
+    Development Scripts for ESP-IDF projects with multi-application build support.
+  url: "https://n3b3x.github.io/hf-espidf-project-tools"
+  twitter:
+    card: "summary_large_image"
+    site: "@n3b3x"
+  og:
+    type: "website"
+    locale: "en_US"
+
+# Social media and sharing
+social:
+  name: "HardFOC ESP-IDF Project Tools"
+  links:
+    - "https://github.com/n3b3x/hf-espidf-project-tools"
+    - "https://github.com/n3b3x"
+
+# Analytics (uncomment and configure if needed)
+# ga_tracking: UA-XXXXXXXXX-X
+# ga_tracking_anonymize_ip: true
+
+# Performance optimizations
+compress_html:
+  clippings: all
+  comments: all
+  endings: all
+  startings: [html, head, body]
+  ignore:
+    envs: all

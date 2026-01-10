@@ -1,0 +1,121 @@
+{% comment %}
+  Feature list component for displaying features in a structured format
+  
+  Usage:
+  {% include feature_list.html features=page.features %}
+  {% include feature_list.html features=site.data.features %}
+{% endcomment %}
+
+{% assign features = include.features %}
+{% assign columns = include.columns | default: 2 %}
+
+{% if features %}
+  <div class="feature-list feature-list-{{ columns }}-col">
+    {% for feature in features %}
+      <div class="feature-item">
+        {% if feature.icon %}
+          <div class="feature-icon">
+            <i class="{{ feature.icon }}"></i>
+          </div>
+        {% endif %}
+        
+        <div class="feature-content">
+          {% if feature.title %}
+            <h3 class="feature-title">{{ feature.title }}</h3>
+          {% endif %}
+          
+          {% if feature.description %}
+            <p class="feature-description">{{ feature.description }}</p>
+          {% endif %}
+          
+          {% if feature.badges %}
+            <div class="feature-badges">
+              {% for badge in feature.badges %}
+                {% include badge.html text=badge.text type=badge.type %}
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<style>
+.feature-list {
+  display: grid;
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.feature-list-2-col {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.feature-list-3-col {
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+
+.feature-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.5rem;
+  background-color: #f8f9fa;
+  border-radius: 0.5rem;
+  border: 1px solid #e9ecef;
+  transition: box-shadow 0.15s ease-in-out;
+}
+
+.feature-item:hover {
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+.feature-icon {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #007bff;
+  color: white;
+  border-radius: 0.5rem;
+  font-size: 1.25rem;
+}
+
+.feature-content {
+  flex: 1;
+}
+
+.feature-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #212529;
+}
+
+.feature-description {
+  margin: 0 0 1rem 0;
+  color: #6c757d;
+  line-height: 1.5;
+}
+
+.feature-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+@media (max-width: 768px) {
+  .feature-list-2-col,
+  .feature-list-3-col {
+    grid-template-columns: 1fr;
+  }
+  
+  .feature-item {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+</style>
