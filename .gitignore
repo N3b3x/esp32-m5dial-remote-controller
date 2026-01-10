@@ -39,3 +39,44 @@
 
 # debug information files
 *.dwo
+
+# -------------------------------
+# ESP-IDF / CMake build artifacts
+# -------------------------------
+# NOTE: We intentionally do NOT ignore `sdkconfig` (it should be versioned).
+
+# Project build outputs (this repo uses `builds/` and a monitor-only build dir)
+/build/
+/builds/
+/build_monitor_only/
+/managed_components/
+
+# CMake / Ninja output (when building in-project)
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/build.ninja
+/rules.ninja
+/.ninja_*
+/compile_commands.json
+
+# ESP-IDF generated/backup config files (keep sdkconfig itself)
+/sdkconfig.old
+/sdkconfig.old.*
+
+# Flash artifacts (if generated in-project)
+/*.bin
+/*.elf
+/*.map
+/*.hex
+
+# Logs
+/log/
+/logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
