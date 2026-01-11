@@ -33,9 +33,14 @@ Settings
 - **Save**: persists to NVS and returns to Landing; also sends `ConfigSet` to the test unit.
 
 Bounds
-- Single action page.
-- Press/tap the button to send `RunBoundsFinding`.
-- Shows a short “running…” state.
+- Action page with on-screen controls: **Start**, **Stop**, **Back**.
+- **Start** sends the bounds-finding command; the UI does not show “running” until the fatigue-test unit ACKs.
+- While running, the page shows progress feedback and allows **Stop**.
+- After completion, the page displays bounds using a crosshair-style visualization (negative/positive) sized for a 240×240 round display.
+
+Pairing / Discovery
+- The transport supports secure discovery/pairing (approved peers stored in NVS).
+- If no approved peer (or configured peer) exists, outbound control messages may be blocked until paired.
 
 Live Counter
 - Shows the latest cycle count.
