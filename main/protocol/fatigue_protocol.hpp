@@ -57,6 +57,17 @@ struct StatusPayload {
     uint8_t  state;    // TestState
     uint8_t  err_code;
 };
+
+struct BoundsResultPayload {
+    uint8_t ok;
+    uint8_t bounded;
+    uint8_t cancelled;
+    uint8_t reserved;
+    float   min_degrees_from_center;
+    float   max_degrees_from_center;
+    float   global_min_degrees;
+    float   global_max_degrees;
+};
 #pragma pack(pop)
 
 static constexpr size_t CONFIG_BASE_SIZE_ = 13;
@@ -111,6 +122,15 @@ inline bool ParseConfig(const uint8_t* payload, size_t len, ConfigPayload& out) 
         std::memcpy(&out.stall_detection_current_factor, payload + 21, 4);
         std::memcpy(&out.bounds_search_accel_rev_s2, payload + 25, 4);
     }
+    return true;
+}
+
+inline bool ParseBoundsResult(const uint8_t* payload, size_t len, BoundsResultPayload& out) noexcept
+{
+    if (payload == nullptr || len < sizeof(BoundsResultPayload)) {
+        return false;
+    }
+    std::memcpy(&out, payload, sizeof(BoundsResultPayload));
     return true;
 }
 

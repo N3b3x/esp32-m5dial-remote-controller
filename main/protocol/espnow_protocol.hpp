@@ -35,7 +35,10 @@ enum class MsgType : uint8_t {
     StatusUpdate,
     Error,
     ErrorClear,
-    TestComplete
+    TestComplete,
+
+    // Fatigue-test extensions
+    BoundsResult
 };
 
 #pragma pack(push, 1)

@@ -146,8 +146,31 @@ private:
     uint8_t settings_editor_u8_new_ = 0;
 
     // Bounds finding
-    bool bounds_running_ = false;
-    uint32_t bounds_until_ms_ = 0;
+    enum class BoundsState : uint8_t {
+        Idle = 0,
+        StartWaitAck,
+        Running,
+        StopWaitAck,
+        Complete,
+        Error,
+    };
+
+    enum class BoundsFocus : uint8_t { Action = 0, Back = 1 };
+
+    BoundsState bounds_state_ = BoundsState::Idle;
+    BoundsFocus bounds_focus_ = BoundsFocus::Action;
+
+    uint32_t bounds_state_since_ms_ = 0;
+    uint32_t bounds_ack_deadline_ms_ = 0;
+
+    bool bounds_have_result_ = false;
+    bool bounds_bounded_ = false;
+    bool bounds_cancelled_ = false;
+    float bounds_min_deg_ = 0.0f;
+    float bounds_max_deg_ = 0.0f;
+    float bounds_global_min_deg_ = 0.0f;
+    float bounds_global_max_deg_ = 0.0f;
+    uint8_t bounds_last_error_code_ = 0;
 
     // Live Counter - popup support for Start/Pause/Resume/Stop
     enum class LivePopupMode : uint8_t {
@@ -201,6 +224,11 @@ private:
     void onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noexcept;
     void onTouchDrag_(int16_t delta_y, uint32_t now_ms) noexcept;
     void onSwipe_(int16_t dx, int16_t dy, uint32_t now_ms) noexcept;
+
+    void updateBoundsState_(uint32_t now_ms) noexcept;
+    void boundsStart_(uint32_t now_ms) noexcept;
+    void boundsStop_(uint32_t now_ms) noexcept;
+    void boundsResetResult_() noexcept;
 
     void nextPage_(int delta) noexcept;
     void enterSettings_() noexcept;

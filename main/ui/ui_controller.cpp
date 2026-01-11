@@ -145,11 +145,7 @@ void ui::UiController::Tick() noexcept
     handleProtoEvents_(now_ms);
     handleInputs_(now_ms);
 
-    // Loading timer for bounds finding.
-    if (bounds_running_ && now_ms >= bounds_until_ms_) {
-        bounds_running_ = false;
-        dirty_ = true;
-    }
+    updateBoundsState_(now_ms);
 
     // Render period: faster when animating, slower when static to reduce flicker
     uint32_t period_ms = 250;  // Default: slow refresh
@@ -159,6 +155,8 @@ void ui::UiController::Tick() noexcept
         period_ms = 500;  // Slow for "Waiting..." animation dots
     } else if (page_ == Page::Terminal && terminal_overscroll_px_ != 0.0f) {
         period_ms = 33;  // ~30fps while spring animation decays
+    } else if (page_ == Page::Bounds && (bounds_state_ == BoundsState::Running || bounds_state_ == BoundsState::StartWaitAck || bounds_state_ == BoundsState::StopWaitAck || bounds_state_ == BoundsState::Complete)) {
+        period_ms = 33;  // Animate bounds UI
     }
     
     if (dirty_ || (now_ms - last_render_ms_) > period_ms) {
@@ -226,6 +224,20 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                     have_status_ = true;
                     logf_(now_ms, "RX: Status cycle=%" PRIu32 " state=%u err=%u", status.cycle_number,
                           static_cast<unsigned>(status.state), static_cast<unsigned>(status.err_code));
+
+                    // If bounds UI is running, allow a state transition on real status.
+                    const auto st = static_cast<fatigue_proto::TestState>(status.state);
+                    if (page_ == Page::Bounds) {
+                        if (bounds_state_ == BoundsState::Running && (st == fatigue_proto::TestState::Idle || st == fatigue_proto::TestState::Completed || st == fatigue_proto::TestState::Error)) {
+                            // Bounds finding ended (or was stopped). If a BoundsResult arrives it will move us to Complete.
+                            if (st == fatigue_proto::TestState::Error) {
+                                bounds_state_ = BoundsState::Error;
+                                bounds_state_since_ms_ = now_ms;
+                                bounds_last_error_code_ = status.err_code;
+                            }
+                            dirty_ = true;
+                        }
+                    }
                     dirty_ = true;
                 }
                 break;
@@ -241,6 +253,61 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                 }
                 break;
             }
+            case espnow::MsgType::CommandAck: {
+                logf_(now_ms, "RX: CommandAck");
+
+                // CommandAck has no payload and does not correlate to a specific command.
+                // We treat an ACK arriving while waiting as an ACK for our pending action.
+                if (page_ == Page::Bounds) {
+                    if (bounds_state_ == BoundsState::StartWaitAck) {
+                        bounds_state_ = BoundsState::Running;
+                        bounds_state_since_ms_ = now_ms;
+                        dirty_ = true;
+                    } else if (bounds_state_ == BoundsState::StopWaitAck) {
+                        bounds_state_ = BoundsState::Idle;
+                        bounds_state_since_ms_ = now_ms;
+                        dirty_ = true;
+                    }
+                }
+                break;
+            }
+            case espnow::MsgType::Error: {
+                // Error payload is (err_code, at_cycle). Only err_code is relevant for bounds UI.
+                uint8_t err_code = 0;
+                if (evt.payload_len >= 1) {
+                    err_code = evt.payload[0];
+                }
+                logf_(now_ms, "RX: Error code=%u", static_cast<unsigned>(err_code));
+                if (page_ == Page::Bounds) {
+                    bounds_state_ = BoundsState::Error;
+                    bounds_state_since_ms_ = now_ms;
+                    bounds_last_error_code_ = err_code;
+                    dirty_ = true;
+                }
+                break;
+            }
+            case espnow::MsgType::BoundsResult: {
+                fatigue_proto::BoundsResultPayload br{};
+                if (fatigue_proto::ParseBoundsResult(evt.payload, evt.payload_len, br)) {
+                    bounds_have_result_ = (br.ok != 0);
+                    bounds_bounded_ = (br.bounded != 0);
+                    bounds_cancelled_ = (br.cancelled != 0);
+                    bounds_min_deg_ = br.min_degrees_from_center;
+                    bounds_max_deg_ = br.max_degrees_from_center;
+                    bounds_global_min_deg_ = br.global_min_degrees;
+                    bounds_global_max_deg_ = br.global_max_degrees;
+
+                    logf_(now_ms, "RX: BoundsResult ok=%u bounded=%u min=%.2f max=%.2f", static_cast<unsigned>(br.ok), static_cast<unsigned>(br.bounded),
+                          static_cast<double>(bounds_min_deg_), static_cast<double>(bounds_max_deg_));
+
+                    if (page_ == Page::Bounds) {
+                        bounds_state_ = BoundsState::Complete;
+                        bounds_state_since_ms_ = now_ms;
+                        dirty_ = true;
+                    }
+                }
+                break;
+            }
             default:
                 // Log other message types succinctly.
                 logf_(now_ms, "RX: Msg type=%u len=%u", static_cast<unsigned>(evt.type), static_cast<unsigned>(evt.payload_len));
@@ -252,6 +319,67 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
     if (conn_status_ == ConnStatus::Connected && (now_ms - last_rx_ms_) > kConnTimeout_ms) {
         conn_status_ = ConnStatus::Connecting;
         logf_(now_ms, "Connection timeout - reconnecting");
+        dirty_ = true;
+    }
+}
+
+void ui::UiController::boundsResetResult_() noexcept
+{
+    bounds_have_result_ = false;
+    bounds_bounded_ = false;
+    bounds_cancelled_ = false;
+    bounds_min_deg_ = 0.0f;
+    bounds_max_deg_ = 0.0f;
+    bounds_global_min_deg_ = 0.0f;
+    bounds_global_max_deg_ = 0.0f;
+    bounds_last_error_code_ = 0;
+}
+
+void ui::UiController::boundsStart_(uint32_t now_ms) noexcept
+{
+    boundsResetResult_();
+
+    (void)espnow::SendCommand(
+        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+        static_cast<uint8_t>(fatigue_proto::CommandId::RunBoundsFinding),
+        nullptr,
+        0);
+    logf_(now_ms, "TX: Command RunBoundsFinding (awaiting ACK)");
+
+    bounds_state_ = BoundsState::StartWaitAck;
+    bounds_state_since_ms_ = now_ms;
+    bounds_ack_deadline_ms_ = now_ms + 1500;
+    dirty_ = true;
+}
+
+void ui::UiController::boundsStop_(uint32_t now_ms) noexcept
+{
+    (void)espnow::SendCommand(
+        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+        static_cast<uint8_t>(fatigue_proto::CommandId::Stop),
+        nullptr,
+        0);
+    logf_(now_ms, "TX: Command Stop (cancel bounds; awaiting ACK)");
+
+    bounds_state_ = BoundsState::StopWaitAck;
+    bounds_state_since_ms_ = now_ms;
+    bounds_ack_deadline_ms_ = now_ms + 1500;
+    dirty_ = true;
+}
+
+void ui::UiController::updateBoundsState_(uint32_t now_ms) noexcept
+{
+    if (page_ != Page::Bounds) {
+        return;
+    }
+
+    // ACK timeouts
+    if ((bounds_state_ == BoundsState::StartWaitAck || bounds_state_ == BoundsState::StopWaitAck) && now_ms >= bounds_ack_deadline_ms_) {
+        bounds_state_ = BoundsState::Error;
+        bounds_state_since_ms_ = now_ms;
+        // 0 => "no-ack" (UI-local meaning)
+        bounds_last_error_code_ = 0;
+        logf_(now_ms, "Bounds: ACK timeout");
         dirty_ = true;
     }
 }
@@ -384,6 +512,14 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
 
         settings_index_ = std::clamp(settings_index_ + delta, 0, item_count - 1);
         dirty_ = true;
+        return;
+    }
+
+    if (page_ == Page::Bounds) {
+        if (delta != 0) {
+            bounds_focus_ = (bounds_focus_ == BoundsFocus::Action) ? BoundsFocus::Back : BoundsFocus::Action;
+            dirty_ = true;
+        }
         return;
     }
 
@@ -526,12 +662,25 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
     }
 
     if (page_ == Page::Bounds) {
-        // Trigger bounds finding.
-        (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_, static_cast<uint8_t>(fatigue_proto::CommandId::RunBoundsFinding), nullptr, 0);
-        logf_(now_ms, "TX: Command RunBoundsFinding");
-        bounds_running_ = true;
-        bounds_until_ms_ = now_ms + 2000;
-        dirty_ = true;
+        if (bounds_focus_ == BoundsFocus::Back) {
+            page_ = Page::Landing;
+            dirty_ = true;
+            return;
+        }
+
+        // Action button (Start/Stop depending on state)
+        if (bounds_state_ == BoundsState::Idle || bounds_state_ == BoundsState::Complete || bounds_state_ == BoundsState::Error) {
+            boundsStart_(now_ms);
+            return;
+        }
+
+        if (bounds_state_ == BoundsState::Running) {
+            boundsStop_(now_ms);
+            return;
+        }
+
+        // If already waiting for ACK, ignore additional presses.
+        playBeep_(1);
         return;
     }
 
@@ -570,7 +719,7 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
 void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noexcept
 {
     // Global back button (for non-landing pages).
-    if (page_ != Page::Landing) {
+    if (page_ != Page::Landing && page_ != Page::Bounds) {
         const Rect back_btn{ 10, 8, 70, 34 };
         if (back_btn.contains(x, y)) {
             // Special case: settings back should discard edits.
@@ -613,8 +762,15 @@ void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noex
     }
 
     if (page_ == Page::Bounds) {
-        const Rect run_btn{ 40, 130, static_cast<int16_t>(240 - 80), 50 };
-        if (run_btn.contains(x, y)) {
+        const Rect back_btn{ 18, 190, 64, 32 };
+        const Rect action_btn{ 90, 190, 132, 32 };
+        if (action_btn.contains(x, y)) {
+            bounds_focus_ = BoundsFocus::Action;
+            onClick_(now_ms);
+            return;
+        }
+        if (back_btn.contains(x, y)) {
+            bounds_focus_ = BoundsFocus::Back;
             onClick_(now_ms);
             return;
         }
@@ -1840,70 +1996,139 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
 {
     const int16_t cx = th::CENTER_X;
     const int16_t cy = th::CENTER_Y;
-    
-    // === RADAR-STYLE BACKGROUND ===
-    // Concentric circles for radar effect
-    canvas_->drawCircle(cx, cy, 100, colors::bg_card);
-    canvas_->drawCircle(cx, cy, 70, colors::bg_card);
-    canvas_->drawCircle(cx, cy, 40, colors::bg_card);
-    
-    // Cross-hair lines
+
+    static constexpr bool kSwingLeftFirst_ = true;
+
+    // === BACKGROUND / CROSSHAIR ===
+    canvas_->drawCircle(cx, cy, 96, colors::bg_card);
+    canvas_->drawCircle(cx, cy, 66, colors::bg_card);
+    canvas_->drawCircle(cx, cy, 38, colors::bg_card);
     canvas_->drawLine(cx - 100, cy, cx + 100, cy, colors::bg_card);
     canvas_->drawLine(cx, cy - 100, cx, cy + 100, colors::bg_card);
-    
-    if (bounds_running_) {
-        // === SCANNING ANIMATION ===
-        const float scan_angle = std::fmod(static_cast<float>(now_ms) * 0.18f, 360.0f);
-        
-        // Rotating scan line (like radar sweep)
-        const float rad = scan_angle * 3.14159f / 180.0f;
-        const int16_t x2 = cx + static_cast<int16_t>(100.0f * std::cos(rad));
-        const int16_t y2 = cy + static_cast<int16_t>(100.0f * std::sin(rad));
-        canvas_->drawWideLine(cx, cy, x2, y2, 3, colors::accent_green);
-        
-        // Arc trail (fading scan trail)
-        canvas_->fillArc(cx, cy, 105, 98, scan_angle - 45, scan_angle, colors::accent_green);
-        
-        // Pulsing center dot
-        const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(now_ms) * 0.01f);
-        const int16_t pulse_r = static_cast<int16_t>(8 + 4 * pulse);
-        canvas_->fillSmoothCircle(cx, cy, pulse_r, colors::accent_green);
-        
-        // Status text
-        drawCenteredText_(cx, cy + 60, "SCANNING", colors::accent_green, 2);
-        
-        // Progress countdown
-        const uint32_t remain = (bounds_until_ms_ > now_ms) ? (bounds_until_ms_ - now_ms) : 0;
-        char time_buf[16];
-        snprintf(time_buf, sizeof(time_buf), "%.1fs", static_cast<double>(remain) / 1000.0);
-        drawCenteredText_(cx, cy + 85, time_buf, colors::text_secondary, 1);
-        
-    } else {
-        // === IDLE STATE ===
-        // Center icon/indicator
-        canvas_->fillSmoothCircle(cx, cy, 35, colors::bg_elevated);
-        canvas_->drawCircle(cx, cy, 35, colors::accent_blue);
-        
-        // Icon placeholder (target symbol)
-        canvas_->drawLine(cx - 15, cy, cx + 15, cy, colors::accent_blue);
-        canvas_->drawLine(cx, cy - 15, cx, cy + 15, colors::accent_blue);
-        canvas_->drawCircle(cx, cy, 10, colors::accent_blue);
-        
-        // "Find Bounds" text
-        drawCenteredText_(cx, cy + 55, "FIND BOUNDS", colors::text_primary, 2);
-        
-        // Hint
-        drawCenteredText_(cx, cy + 80, "Press dial to start", colors::text_hint, 1);
-    }
-    
-    // === CORNER ELEMENTS ===
-    // Back button (top-left)
-    canvas_->fillSmoothRoundRect(8, 8, 50, 26, 8, colors::bg_elevated);
+
+    // Title
     canvas_->setTextSize(1);
-    canvas_->setTextColor(colors::text_secondary);
-    canvas_->setCursor(18, 15);
-    canvas_->print("< Back");
-    
+    canvas_->setTextColor(colors::text_primary);
+    drawCenteredText_(cx, 10, "FIND BOUNDS", colors::text_primary, 1);
+
+    // === STATUS TEXT ===
+    const char* status1 = "READY";
+    const char* status2 = "";
+    uint16_t status_color = colors::text_secondary;
+    if (bounds_state_ == BoundsState::StartWaitAck) {
+        status1 = "STARTING";
+        status2 = "Waiting for ACK";
+        status_color = colors::text_hint;
+    } else if (bounds_state_ == BoundsState::Running) {
+        status1 = "RUNNING";
+        status2 = "Finding mechanical limits";
+        status_color = colors::accent_green;
+    } else if (bounds_state_ == BoundsState::StopWaitAck) {
+        status1 = "STOPPING";
+        status2 = "Waiting for ACK";
+        status_color = colors::text_hint;
+    } else if (bounds_state_ == BoundsState::Complete) {
+        status1 = bounds_have_result_ ? (bounds_bounded_ ? "BOUNDS FOUND" : "DEFAULT RANGE") : "DONE";
+        status2 = bounds_have_result_ ? "Showing min/max" : "No data";
+        status_color = colors::accent_blue;
+    } else if (bounds_state_ == BoundsState::Error) {
+        status1 = "CAN'T START";
+        status2 = (bounds_last_error_code_ == 0) ? "No ACK from machine" : "Error from machine";
+        status_color = colors::state_error;
+    }
+
+    drawCenteredText_(cx, 28, status1, status_color, 2);
+    if (status2[0] != '\0') {
+        drawCenteredText_(cx, 46, status2, colors::text_hint, 1);
+    }
+
+    // === VISUALIZATION (CROSSHAIR + TRACK) ===
+    const int16_t track_y = cy + 16;
+    const int16_t track_half_w = 72;
+    const int16_t track_x1 = cx - track_half_w;
+    const int16_t track_x2 = cx + track_half_w;
+    canvas_->drawWideLine(track_x1, track_y, track_x2, track_y, 3, colors::bg_elevated);
+    canvas_->fillSmoothCircle(cx, track_y, 4, colors::text_secondary);
+
+    // Determine displayed bounds (if we have them)
+    const bool show_bounds = (bounds_state_ == BoundsState::Complete) && bounds_have_result_;
+    const float min_deg = bounds_min_deg_;
+    const float max_deg = bounds_max_deg_;
+    const float max_abs = std::max(1.0f, std::max(std::fabs(min_deg), std::fabs(max_deg)));
+    const float display_max_deg = show_bounds ? max_abs : 75.0f;
+    const float px_per_deg = static_cast<float>(track_half_w) / display_max_deg;
+
+    int16_t min_x = cx;
+    int16_t max_x = cx;
+    if (show_bounds) {
+        min_x = static_cast<int16_t>(cx + static_cast<int16_t>(min_deg * px_per_deg));
+        max_x = static_cast<int16_t>(cx + static_cast<int16_t>(max_deg * px_per_deg));
+        min_x = std::max(track_x1, std::min(track_x2, min_x));
+        max_x = std::max(track_x1, std::min(track_x2, max_x));
+
+        // Bounds markers
+        canvas_->drawWideLine(min_x, track_y - 10, min_x, track_y + 10, 3, colors::accent_orange);
+        canvas_->drawWideLine(max_x, track_y - 10, max_x, track_y + 10, 3, colors::accent_orange);
+
+        // Highlight the usable window
+        canvas_->drawWideLine(min_x, track_y, max_x, track_y, 5, colors::accent_blue);
+    }
+
+    // Armature indicator: rotational swing around center (starts left-first or right-first).
+    float sim_angle_deg = 0.0f;
+    if (bounds_state_ == BoundsState::Running || bounds_state_ == BoundsState::StartWaitAck || bounds_state_ == BoundsState::StopWaitAck) {
+        const float t = static_cast<float>((now_ms - bounds_state_since_ms_) % 2400U) / 2400.0f;
+        const float phase = 2.0f * 3.14159f * t;
+        const float s = kSwingLeftFirst_ ? -std::cos(phase) : std::cos(phase);
+        sim_angle_deg = s * 60.0f;
+    } else if (show_bounds) {
+        const float t = static_cast<float>((now_ms - bounds_state_since_ms_) % 3000U) / 3000.0f;
+        const float phase = 2.0f * 3.14159f * t;
+        const float s = kSwingLeftFirst_ ? -std::cos(phase) : std::cos(phase);
+        sim_angle_deg = (min_deg + max_deg) * 0.5f + s * (max_deg - min_deg) * 0.5f;
+    }
+
+    const int16_t pivot_x = cx;
+    const int16_t pivot_y = static_cast<int16_t>(cy - 6);
+    const int16_t arm_len = 60;
+    const float rad = sim_angle_deg * 3.14159f / 180.0f;
+    const int16_t tip_x = static_cast<int16_t>(pivot_x + static_cast<int16_t>(arm_len * std::sin(rad)));
+    const int16_t tip_y = static_cast<int16_t>(pivot_y - static_cast<int16_t>(arm_len * std::cos(rad)));
+    canvas_->drawWideLine(pivot_x, pivot_y, tip_x, tip_y, 4, colors::text_primary);
+    canvas_->fillSmoothCircle(pivot_x, pivot_y, 4, colors::bg_elevated);
+    canvas_->drawCircle(pivot_x, pivot_y, 5, colors::bg_card);
+    canvas_->fillSmoothCircle(tip_x, tip_y, 6, colors::accent_green);
+
+    // Show where the armature maps onto the track (small dot)
+    int16_t dot_x = static_cast<int16_t>(cx + static_cast<int16_t>(sim_angle_deg * px_per_deg));
+    dot_x = std::max(track_x1, std::min(track_x2, dot_x));
+    canvas_->fillSmoothCircle(dot_x, track_y, 3, colors::text_primary);
+
+    // Numeric readout (only when we have results)
+    if (show_bounds) {
+        char buf1[32];
+        char buf2[32];
+        snprintf(buf1, sizeof(buf1), "MIN %.1f\xB0", static_cast<double>(min_deg));
+        snprintf(buf2, sizeof(buf2), "MAX %.1f\xB0", static_cast<double>(max_deg));
+        canvas_->setTextSize(1);
+        drawCenteredText_(cx - 48, 132, buf1, colors::accent_orange, 1);
+        drawCenteredText_(cx + 48, 132, buf2, colors::accent_orange, 1);
+    }
+
+    // === BOTTOM CONTROLS (Back + Start/Stop) ===
+    const Rect back_btn{ 18, 190, 64, 32 };
+    const Rect action_btn{ 90, 190, 132, 32 };
+
+    const char* action_label = "Start";
+    if (bounds_state_ == BoundsState::Running) action_label = "Stop";
+    if (bounds_state_ == BoundsState::StartWaitAck) action_label = "Starting";
+    if (bounds_state_ == BoundsState::StopWaitAck) action_label = "Stopping";
+    if (bounds_state_ == BoundsState::Complete) action_label = "Run Again";
+    if (bounds_state_ == BoundsState::Error) action_label = "Retry";
+
+    drawModernButton_(back_btn.x, back_btn.y, back_btn.w, back_btn.h, "Back", bounds_focus_ == BoundsFocus::Back, false, colors::accent_blue);
+    drawModernButton_(action_btn.x, action_btn.y, action_btn.w, action_btn.h, action_label, bounds_focus_ == BoundsFocus::Action, false, colors::accent_blue);
+
     // Connection indicator (top-right)
     th::drawConnectionDot(240 - 18, 18, conn_status_ == ConnStatus::Connected, now_ms);
 }
