@@ -40,7 +40,7 @@ enum class MsgType : uint8_t {
     TestComplete,
 
     // Fatigue-test extensions
-    BoundsResult = 12,
+    BoundsResult = 13,
 
     // Security / Pairing messages (20-29 range)
     PairingRequest = 20,

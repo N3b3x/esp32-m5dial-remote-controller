@@ -31,9 +31,8 @@ enum class CommandId : uint8_t {
     Resume = 3,
     Stop = 4,
 
-    // NOTE: Not implemented by the current test unit firmware in this repo.
-    // Keep this here for forward-compat when/if the unit adds a dedicated
-    // bounds-finding command.
+    // Dedicated bounds-finding command (implemented by the fatigue test unit
+    // in this repo: examples/esp32/main/fatigue_test_espnow).
     RunBoundsFinding = 5,
 };
 
