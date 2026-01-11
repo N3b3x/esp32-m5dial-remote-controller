@@ -52,6 +52,7 @@ set(MAIN_REQUIRES
     esp_wifi
     esp_netif
     esp_event
+    mbedtls
     M5Unified
     M5GFX
     EC11_Encoder
@@ -64,6 +65,7 @@ set(COMPONENT_SRCS "${MAIN_SOURCE_FILE}")
 if(APP_TYPE STREQUAL "m5dial_remote_controller")
     list(APPEND COMPONENT_SRCS
         "settings.cpp"
+        "protocol/espnow_peer_store.cpp"
         "protocol/espnow_protocol.cpp"
         "ui/ui_controller.cpp"
     )
@@ -100,3 +102,10 @@ endif()
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     "EXAMPLE_TYPE_${APP_TYPE}=1"
 )
+
+# The secret is passed from build_app.sh via -D ESPNOW_PAIRING_SECRET_HEX
+if(DEFINED ESPNOW_PAIRING_SECRET_HEX)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        ESPNOW_PAIRING_SECRET_HEX="${ESPNOW_PAIRING_SECRET_HEX}"
+    )
+endif()

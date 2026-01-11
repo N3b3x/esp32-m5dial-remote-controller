@@ -80,3 +80,6 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# Local secrets
+/secrets.local.yml

@@ -15,6 +15,8 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 
+#include "espnow_security.hpp"
+
 namespace espnow {
 
 static constexpr uint8_t SYNC_BYTE_ = 0xAA;
@@ -38,7 +40,21 @@ enum class MsgType : uint8_t {
     TestComplete,
 
     // Fatigue-test extensions
-    BoundsResult
+    BoundsResult = 12,
+
+    // Security / Pairing messages (20-29 range)
+    PairingRequest = 20,
+    PairingResponse = 21,
+    PairingConfirm = 22,
+    PairingReject = 23,
+    Unpair = 24,
+};
+
+enum class PairingState : uint8_t {
+    Idle,
+    WaitingForResponse,
+    Complete,
+    Failed,
 };
 
 #pragma pack(push, 1)
@@ -64,6 +80,7 @@ struct ProtoEvent {
     uint8_t sequence_id;
     uint8_t payload[MAX_PAYLOAD_SIZE_];
     size_t payload_len;
+    uint8_t src_mac[6];
 };
 
 bool Init(QueueHandle_t event_queue) noexcept;
@@ -71,6 +88,21 @@ bool SendDeviceDiscovery() noexcept;
 bool SendConfigRequest(uint8_t device_id) noexcept;
 bool SendConfigSet(uint8_t device_id, const void* config_data, size_t config_len) noexcept;
 bool SendCommand(uint8_t device_id, uint8_t command_id, const void* payload, size_t payload_len) noexcept;
+
+// ============================================================================
+// PAIRING / PEER MANAGEMENT
+// ============================================================================
+
+bool StartPairing() noexcept;
+void CancelPairing() noexcept;
+PairingState GetPairingState() noexcept;
+
+SecuritySettings& GetSecuritySettings() noexcept;
+bool IsPeerApproved(const uint8_t mac[6]) noexcept;
+bool AddApprovedPeer(const uint8_t mac[6], DeviceType type, const char* name) noexcept;
+bool RemoveApprovedPeer(const uint8_t mac[6]) noexcept;
+size_t GetApprovedPeerCount() noexcept;
+bool GetTargetDeviceMac(uint8_t mac_out[6]) noexcept;
 
 inline uint16_t crc16_ccitt(const uint8_t* data, size_t len) noexcept
 {
