@@ -75,6 +75,23 @@ void ui::UiController::Init() noexcept
     }
     vTaskDelay(pdMS_TO_TICKS(650));  // Hold boot splash briefly
 
+    // Option A: fade out to black before handing off to the real UI.
+    // (Avoids a harsh brightness jump and prevents a boot-splash "flash".)
+    constexpr int kFadeOutSteps = 24;
+    for (int i = kFadeOutSteps; i >= 0; --i) {
+        const float p = static_cast<float>(i) / static_cast<float>(kFadeOutSteps);
+        const uint8_t b = static_cast<uint8_t>(std::min(128.0f, 128.0f * p));
+        M5.Display.setBrightness(b);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    // Ensure we don't briefly reveal the splash again when restoring brightness.
+    if (canvas_ != nullptr) {
+        canvas_->fillScreen(TFT_BLACK);
+        canvas_->pushSprite(0, 0);
+    } else {
+        M5.Display.fillScreen(TFT_BLACK);
+    }
+
     // Apply saved brightness setting
     if (settings_ != nullptr) {
         M5.Display.setBrightness(settings_->ui.brightness);
