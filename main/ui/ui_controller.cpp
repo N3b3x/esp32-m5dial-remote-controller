@@ -358,69 +358,74 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         }
 
         // If editing a numeric value, rotation changes it.
-        if (settings_focus_ == SettingsFocus::List && settings_value_editing_) {
-            switch (settings_index_) {
-                case 0: // cycles
-                    edit_settings_.test_unit.cycle_amount = clamp_add_u32(edit_settings_.test_unit.cycle_amount, delta, 10);
+        if (settings_value_editing_) {
+            switch (settings_category_) {
+                case SettingsCategory::Main:
+                    // Main menu has no editable values.
                     break;
-                case 1: // time per cycle
-                    edit_settings_.test_unit.time_per_cycle_sec = clamp_add_u32(edit_settings_.test_unit.time_per_cycle_sec, delta, 1);
+
+                case SettingsCategory::FatigueTest:
+                    // 0=< Back, 1=Cycles, 2=Time/Cycle, 3=Dwell
+                    switch (settings_index_) {
+                        case 1:
+                            edit_settings_.test_unit.cycle_amount = clamp_add_u32(edit_settings_.test_unit.cycle_amount, delta, 10);
+                            break;
+                        case 2:
+                            edit_settings_.test_unit.time_per_cycle_sec = clamp_add_u32(edit_settings_.test_unit.time_per_cycle_sec, delta, 1);
+                            break;
+                        case 3:
+                            edit_settings_.test_unit.dwell_time_sec = clamp_add_u32(edit_settings_.test_unit.dwell_time_sec, delta, 1);
+                            break;
+                        default:
+                            break;
+                    }
                     break;
-                case 2: // dwell
-                    edit_settings_.test_unit.dwell_time_sec = clamp_add_u32(edit_settings_.test_unit.dwell_time_sec, delta, 1);
+
+                case SettingsCategory::BoundsFinding:
+                    // 0=< Back, 1=Mode(toggle), 2..5=numeric
+                    switch (settings_index_) {
+                        case 2:
+                            edit_settings_.test_unit.bounds_search_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.bounds_search_velocity_rpm + 0.1f * delta);
+                            break;
+                        case 3:
+                            edit_settings_.test_unit.stallguard_min_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.stallguard_min_velocity_rpm + 0.1f * delta);
+                            break;
+                        case 4:
+                            edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, edit_settings_.test_unit.stall_detection_current_factor + 0.05f * delta);
+                            break;
+                        case 5:
+                            edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, edit_settings_.test_unit.bounds_search_accel_rev_s2 + 0.1f * delta);
+                            break;
+                        default:
+                            break;
+                    }
                     break;
-                case 4: // bounds_search_velocity_rpm
-                    edit_settings_.test_unit.bounds_search_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.bounds_search_velocity_rpm + 0.1f * delta);
-                    break;
-                case 5:
-                    edit_settings_.test_unit.stallguard_min_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.stallguard_min_velocity_rpm + 0.1f * delta);
-                    break;
-                case 6:
-                    edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, edit_settings_.test_unit.stall_detection_current_factor + 0.05f * delta);
-                    break;
-                case 7:
-                    edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, edit_settings_.test_unit.bounds_search_accel_rev_s2 + 0.1f * delta);
-                    break;
-                case 8: // brightness
-                    {
-                        int new_brightness = static_cast<int>(edit_settings_.ui.brightness) + delta * 5;
-                        edit_settings_.ui.brightness = static_cast<uint8_t>(std::max(10, std::min(255, new_brightness)));
+
+                case SettingsCategory::UI:
+                    // 0=< Back, 1=Brightness(numeric), 2=Flip(toggle)
+                    if (settings_index_ == 1) {
+                        const int new_brightness = static_cast<int>(edit_settings_.ui.brightness) + delta * 5;
+                        edit_settings_.ui.brightness = static_cast<uint8_t>(std::clamp(new_brightness, 10, 255));
                         // Apply brightness immediately for preview
                         M5.Display.setBrightness(edit_settings_.ui.brightness);
                     }
                     break;
-                default:
-                    break;
             }
+
             dirty_ = true;
             return;
         }
 
-        // Otherwise rotation moves focus/selection.
-        if (settings_focus_ == SettingsFocus::List) {
-            constexpr int kItemCount = 10; // 0..9
-            settings_index_ += delta;
-            if (settings_index_ < 0) {
-                settings_index_ = 0;
-                settings_focus_ = SettingsFocus::Back;
-            } else if (settings_index_ >= kItemCount) {
-                settings_index_ = kItemCount - 1;
-                settings_focus_ = SettingsFocus::Save;
-            }
-        } else if (settings_focus_ == SettingsFocus::Back) {
-            if (delta > 0) {
-                settings_focus_ = SettingsFocus::Save;
-            } else {
-                settings_focus_ = SettingsFocus::List;
-            }
-        } else {
-            if (delta < 0) {
-                settings_focus_ = SettingsFocus::Back;
-            } else {
-                settings_focus_ = SettingsFocus::List;
-            }
+        // Otherwise rotation moves selection within current category.
+        int item_count = 4;
+        switch (settings_category_) {
+            case SettingsCategory::Main: item_count = 4; break;
+            case SettingsCategory::FatigueTest: item_count = 4; break;
+            case SettingsCategory::BoundsFinding: item_count = 6; break;
+            case SettingsCategory::UI: item_count = 3; break;
         }
 
+        settings_index_ = std::clamp(settings_index_ + delta, 0, item_count - 1);
         dirty_ = true;
         return;
     }
@@ -440,8 +445,19 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         return;
     }
 
-    if (page_ == Page::Terminal && encoder_scroll_mode_) {
-        scroll_lines_ = std::max(0, scroll_lines_ + (delta * 2));
+    if (page_ == Page::Terminal) {
+        // Always scroll on encoder rotation - no mode toggle needed.
+        // Match the earlier UX:
+        //   CW scrolls UP (newer, toward bottom)
+        //   CCW scrolls DOWN (older, toward top)
+        constexpr int16_t log_top = 38;
+        constexpr int16_t log_bottom = 240 - 28;
+        constexpr int16_t line_h = 14;
+        const int max_lines = (log_bottom - log_top) / line_h;
+        const int max_scroll = std::max(0, static_cast<int>(log_count_) - max_lines);
+
+        // scroll_lines_ is "lines away from newest".
+        scroll_lines_ = std::clamp(scroll_lines_ - (delta * 2), 0, max_scroll);
         dirty_ = true;
         return;
     }
@@ -474,10 +490,11 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
         return;
     }
 
-    // Terminal: toggle encoder scroll mode.
+    // Terminal: button click goes back to landing
     if (page_ == Page::Terminal) {
-        encoder_scroll_mode_ = !encoder_scroll_mode_;
-        logf_(now_ms, "UI: encoder scroll %s", encoder_scroll_mode_ ? "ON" : "OFF");
+        page_ = Page::Landing;
+        playBeep_(2);
+        logf_(now_ms, "UI: back to landing");
         dirty_ = true;
         return;
     }
@@ -487,32 +504,73 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             enterSettings_();
         }
 
-        if (settings_focus_ == SettingsFocus::Back) {
-            settingsBack_();
-            dirty_ = true;
-            return;
-        }
-        if (settings_focus_ == SettingsFocus::Save) {
-            settingsSave_(now_ms);
+        playBeep_(2);
+
+        // Click behavior is driven by the category-based list in drawSettings_().
+        // Index 0 is always "< Back".
+        if (settings_index_ == 0) {
+            settings_value_editing_ = false;
+            if (settings_category_ == SettingsCategory::Main) {
+                // Exit settings (discard) via Back.
+                settingsBack_();
+            } else {
+                // Go up one level.
+                settings_category_ = SettingsCategory::Main;
+                settings_index_ = 0;
+            }
             dirty_ = true;
             return;
         }
 
-        // Toggle booleans with click; enter/exit edit for numerics.
-        switch (settings_index_) {
-            case 3: // bounds method
-                edit_settings_.test_unit.bounds_method_stallguard = !edit_settings_.test_unit.bounds_method_stallguard;
-                dirty_ = true;
-                return;
-            case 9: // orientation (flip UI)
-                edit_settings_.ui.orientation_flipped = !edit_settings_.ui.orientation_flipped;
-                dirty_ = true;
-                return;
-            default:
-                settings_value_editing_ = !settings_value_editing_;
-                dirty_ = true;
-                return;
+        // Main: enter sub-category.
+        if (settings_category_ == SettingsCategory::Main) {
+            settings_value_editing_ = false;
+            switch (settings_index_) {
+                case 1: settings_category_ = SettingsCategory::FatigueTest; break;
+                case 2: settings_category_ = SettingsCategory::BoundsFinding; break;
+                case 3: settings_category_ = SettingsCategory::UI; break;
+                default: break;
+            }
+            // Start on first real item (not Back).
+            settings_index_ = 1;
+            dirty_ = true;
+            return;
         }
+
+        // Sub-categories: toggles vs edit mode.
+        switch (settings_category_) {
+            case SettingsCategory::FatigueTest:
+                // Numeric entries: toggle edit mode.
+                settings_value_editing_ = !settings_value_editing_;
+                break;
+
+            case SettingsCategory::BoundsFinding:
+                if (settings_index_ == 1) {
+                    // Mode toggle.
+                    edit_settings_.test_unit.bounds_method_stallguard = !edit_settings_.test_unit.bounds_method_stallguard;
+                    settings_value_editing_ = false;
+                } else {
+                    settings_value_editing_ = !settings_value_editing_;
+                }
+                break;
+
+            case SettingsCategory::UI:
+                if (settings_index_ == 2) {
+                    // Flip toggle.
+                    edit_settings_.ui.orientation_flipped = !edit_settings_.ui.orientation_flipped;
+                    settings_value_editing_ = false;
+                } else {
+                    // Brightness numeric.
+                    settings_value_editing_ = !settings_value_editing_;
+                }
+                break;
+
+            case SettingsCategory::Main:
+                break;
+        }
+
+        dirty_ = true;
+        return;
     }
 
     if (page_ == Page::Bounds) {
@@ -636,7 +694,12 @@ void ui::UiController::onTouchDrag_(int16_t delta_y, uint32_t now_ms) noexcept
         // Drag up (negative delta_y) should scroll up (older logs).
         const int lines = (-delta_y) / 12;
         if (lines != 0) {
-            scroll_lines_ = std::max(0, scroll_lines_ + lines);
+            constexpr int16_t log_top = 38;
+            constexpr int16_t log_bottom = 240 - 28;
+            constexpr int16_t line_h = 14;
+            const int max_lines = (log_bottom - log_top) / line_h;
+            const int max_scroll = std::max(0, static_cast<int>(log_count_) - max_lines);
+            scroll_lines_ = std::clamp(scroll_lines_ + lines, 0, max_scroll);
             dirty_ = true;
         }
     }
@@ -686,8 +749,13 @@ void ui::UiController::enterSettings_() noexcept
     edit_settings_ = *settings_;
     in_settings_edit_ = true;
     settings_index_ = 0;
+    settings_category_ = SettingsCategory::Main;
     settings_focus_ = SettingsFocus::List;
     settings_value_editing_ = false;
+
+    // Reset animation state so the list starts stable.
+    settings_anim_offset_ = 0.0f;
+    settings_target_offset_ = 0.0f;
 }
 
 void ui::UiController::settingsBack_() noexcept
@@ -695,6 +763,8 @@ void ui::UiController::settingsBack_() noexcept
     // Discard changes, return to landing.
     in_settings_edit_ = false;
     settings_value_editing_ = false;
+    settings_category_ = SettingsCategory::Main;
+    settings_index_ = 0;
     page_ = Page::Landing;
 }
 
