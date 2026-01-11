@@ -59,9 +59,9 @@ private:
     // Settings menu category/layer
     enum class SettingsCategory : uint8_t {
         Main = 0,       // Top-level: Fatigue Test, Bounds Finding, UI
-        FatigueTest,    // Cycles, Time/Cycle, Dwell Time
+        FatigueTest,    // Cycles, VMAX/AMAX, Dwell
         BoundsFinding,  // Mode, Search Speed, SG Min Vel, Stall Factor, Search Accel
-        UI              // Brightness, Flip Display
+        UI              // Brightness
     };
 
     // Connection status
@@ -87,6 +87,8 @@ private:
     // Connection tracking
     ConnStatus conn_status_ = ConnStatus::Disconnected;
     uint32_t last_rx_ms_ = 0;
+    // Set when we newly transition to Connected; cleared after first ConfigResponse.
+    bool pending_machine_resync_ = false;
     static constexpr uint32_t kConnTimeout_ms = 3000;
 
     // Main menu (Landing) - Circular carousel like M5Dial factory demo
@@ -112,6 +114,7 @@ private:
     Settings edit_settings_{};
     Settings original_settings_{}; // For change detection
     bool in_settings_edit_ = false;
+    bool settings_dirty_ = false; // True once user has applied an edit (unsaved)
     
     SettingsCategory settings_category_ = SettingsCategory::Main;
     int settings_index_ = 0;
@@ -123,7 +126,7 @@ private:
     // Settings popup for save confirmation
     enum class SettingsPopupMode : uint8_t {
         None = 0,
-        SaveConfirm,       // Back pressed: SAVE & EXIT / DISCARD / CANCEL
+        SaveConfirm,       // Leaving Settings with unsent changes: SEND / RESYNC
         ValueChangeConfirm // Value editor exit: KEEP / DISCARD
     };
     SettingsPopupMode settings_popup_mode_ = SettingsPopupMode::None;
@@ -134,7 +137,7 @@ private:
     SettingsCategory settings_editor_category_ = SettingsCategory::Main;
     int settings_editor_index_ = 0;
 
-    enum class SettingsEditorValueType : uint8_t { None = 0, U32, F32, Bool, U8 };
+    enum class SettingsEditorValueType : uint8_t { None = 0, U32, F32, Bool, U8, I8 };
     SettingsEditorValueType settings_editor_type_ = SettingsEditorValueType::None;
     uint32_t settings_editor_u32_old_ = 0;
     uint32_t settings_editor_u32_new_ = 0;
@@ -144,6 +147,14 @@ private:
     bool settings_editor_bool_new_ = false;
     uint8_t settings_editor_u8_old_ = 0;
     uint8_t settings_editor_u8_new_ = 0;
+    int8_t settings_editor_i8_old_ = 0;
+    int8_t settings_editor_i8_new_ = 0;
+
+    // Settings value editor: adjustable step size for float values (changed via long-press)
+    float settings_editor_f32_step_ = 0.1f;
+
+    // Settings navigation: remember which main item opened a sub-category.
+    int settings_return_main_index_ = 0;
 
     // Bounds finding
     enum class BoundsState : uint8_t {
@@ -173,12 +184,14 @@ private:
     uint8_t bounds_last_error_code_ = 0;
 
     // Live Counter - popup support for Start/Pause/Resume/Stop
+    enum class LiveFocus : uint8_t { Actions = 0, Back = 1 };
     enum class LivePopupMode : uint8_t {
         None = 0,
         StartConfirm,     // Idle state: CANCEL / START
         RunningActions,   // Running: BACK / PAUSE / STOP
         PausedActions     // Paused: BACK / RESUME / STOP
     };
+    LiveFocus live_focus_ = LiveFocus::Actions;
     LivePopupMode live_popup_mode_ = LivePopupMode::None;
     uint8_t live_popup_selection_ = 0;
     uint8_t pending_command_id_ = 0;
@@ -202,14 +215,20 @@ private:
     int16_t last_touch_x_ = 0;
     int16_t touch_start_x_ = 0;
     int16_t touch_start_y_ = 0;
+    uint32_t touch_start_ms_ = 0;
     bool swipe_detected_ = false;
 
     // Settings scrolling and animation
     int settings_scroll_offset_ = 0;
     float settings_anim_offset_ = 0.0f;
     float settings_target_offset_ = 0.0f;
-    static constexpr int kSettingsItemHeight_ = 40;
+    static constexpr int kSettingsItemHeight_ = 44;
     static constexpr int kSettingsVisibleItems_ = 4;
+
+    // Remember last selection inside each submenu (skip index 0 "< Back").
+    int settings_last_fatigue_index_ = 1;
+    int settings_last_bounds_index_ = 1;
+    int settings_last_ui_index_ = 1;
 
     // Visual feedback
     uint32_t last_action_ms_ = 0;
@@ -219,6 +238,9 @@ private:
     void logf_(uint32_t now_ms, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
     void handleProtoEvents_(uint32_t now_ms) noexcept;
     void handleInputs_(uint32_t now_ms) noexcept;
+    void cycleSettingsEditorStep_() noexcept;
+    void initSettingsEditorStep_() noexcept;
+    void getSettingsEditorF32StepOptions_(const float*& steps, size_t& count) const noexcept;
     void onRotate_(int delta, uint32_t now_ms) noexcept;
     void onClick_(uint32_t now_ms) noexcept;
     void onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noexcept;

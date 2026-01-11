@@ -14,6 +14,8 @@ This project targets the M5Stack Dial (1.28" round IPS + touch + encoder). The U
   - Bounds: run bounds
   - Live Counter: start/stop
   - Terminal: toggle encoder-scroll mode (tap the top bar also works)
+- **BtnA long-press**
+  - Settings (value editor): cycle edit step size for numeric values
 - **Touch drag**
   - Terminal: scroll log history
 
@@ -29,8 +31,18 @@ Landing (Main Menu)
 
 Settings
 - Editing is done on a **local edit buffer**.
-- **Back**: discards edits and returns to Landing.
-- **Save**: persists to NVS and returns to Landing; also sends `ConfigSet` to the test unit.
+- Incoming config messages normally refresh the displayed values, but **won’t overwrite local edits** while changes are pending.
+- Leaving Settings with unsent changes prompts for what to do:
+  - **Send**: transmit all changes to the fatigue-test unit (only if connected).
+  - **Resync**: discard local edits and reload from the last known machine config.
+- On first connect (or reconnect), the UI **always resyncs from the machine**. Any offline edits are treated as stale and will be discarded on the first config response.
+
+### Value editor behavior
+
+- Rotation applies the current step size.
+- Long-press cycles step size: `{0.1, 1, 10}`.
+- Values are rounded and displayed with **at most one decimal place**.
+- Dwell time is edited/displayed in **seconds** with **0.5s increments** (stored/transmitted in milliseconds).
 
 Bounds
 - Action page with on-screen controls: **Start**, **Stop**, **Back**.

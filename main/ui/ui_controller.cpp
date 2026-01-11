@@ -22,6 +22,31 @@ static const char* TAG_ = "ui";
 namespace th = ui::theme;
 namespace colors = ui::theme::colors;
 
+namespace {
+static const char* const kUnitRevPerS2 = reinterpret_cast<const char*>(u8"rev/s\u00B2");
+static const char* const kLabelAmaxRevPerS2 = reinterpret_cast<const char*>(u8"AMAX (rev/s\u00B2)");
+
+// UI-safe fallbacks (many M5Dial fonts do not contain the superscript-2 glyph).
+static const char* const kUnitRevPerS2Ui = "rev/s^2";
+static const char* const kLabelAmaxRevPerS2Ui = "AMAX (rev/s^2)";
+
+static void applyConfigToSettings_(Settings& s, const fatigue_proto::ConfigPayload& c) noexcept
+{
+    s.test_unit.cycle_amount = c.cycle_amount;
+    s.test_unit.oscillation_vmax_rpm = c.oscillation_vmax_rpm;
+    s.test_unit.oscillation_amax_rev_s2 = c.oscillation_amax_rev_s2;
+    s.test_unit.dwell_time_ms = c.dwell_time_ms;
+    // Protocol: 0 = stallguard, 1 = encoder
+    s.test_unit.bounds_method_stallguard = (c.bounds_method == 0);
+
+    s.test_unit.bounds_search_velocity_rpm = c.bounds_search_velocity_rpm;
+    s.test_unit.stallguard_min_velocity_rpm = c.stallguard_min_velocity_rpm;
+    s.test_unit.stallguard_sgt = c.stallguard_sgt;
+    s.test_unit.stall_detection_current_factor = c.stall_detection_current_factor;
+    s.test_unit.bounds_search_accel_rev_s2 = c.bounds_search_accel_rev_s2;
+}
+}
+
 // Static menu item definitions matching M5Dial factory demo style
 const ui::UiController::CircularMenuItem ui::UiController::kMenuItems_[MENU_COUNT_] = {
     {"Settings", nullptr, ui::assets::CircularIconColors::red, ui::assets::kCircularIcon_settings, 42, 42, Page::Settings},
@@ -213,6 +238,9 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
         last_rx_ms_ = now_ms;
         if (conn_status_ != ConnStatus::Connected) {
             conn_status_ = ConnStatus::Connected;
+            // We just (re)connected; force a resync on the next ConfigResponse so
+            // any offline edits do not linger or get partially overwritten.
+            pending_machine_resync_ = true;
             logf_(now_ms, "Connected to fatigue tester");
         }
 
@@ -247,14 +275,67 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                 if (fatigue_proto::ParseConfig(evt.payload, evt.payload_len, cfg)) {
                     last_remote_config_ = cfg;
                     have_remote_config_ = true;
-                    logf_(now_ms, "RX: ConfigResponse cycles=%" PRIu32 " t=%" PRIu32 "s dwell=%" PRIu32 "s", cfg.cycle_amount,
-                          cfg.time_per_cycle_sec, cfg.dwell_time_sec);
+                      logf_(now_ms, "RX: ConfigResponse cycles=%" PRIu32 " VMAX=%.1f AMAX=%.1f dwell=%.2fs",
+                          cfg.cycle_amount, cfg.oscillation_vmax_rpm, cfg.oscillation_amax_rev_s2,
+                          static_cast<double>(cfg.dwell_time_ms) / 1000.0);
+
+                    // Apply the received config into our local Settings so the Settings menu
+                    // reflects the device state (including StallGuard fields).
+                    if (settings_ != nullptr) {
+                        applyConfigToSettings_(*settings_, cfg);
+                    }
+
+                    // On (re)connect, always resync the Settings editor state from the machine.
+                    // This intentionally discards any offline edits that were not sent to the unit.
+                    if (pending_machine_resync_) {
+                        if (page_ == Page::Settings && in_settings_edit_) {
+                            // Cancel any in-progress edit UI.
+                            settings_popup_mode_ = SettingsPopupMode::None;
+                            settings_popup_selection_ = 0;
+                            settings_value_editor_active_ = false;
+                            settings_editor_type_ = SettingsEditorValueType::None;
+
+                            // Replace displayed values with machine config and clear dirty edits.
+                            if (settings_ != nullptr) {
+                                edit_settings_ = *settings_;
+                            } else {
+                                applyConfigToSettings_(edit_settings_, cfg);
+                            }
+                            original_settings_ = edit_settings_;
+                            settings_dirty_ = false;
+                            logf_(now_ms, "UI: resynced settings from machine");
+                        }
+                        pending_machine_resync_ = false;
+                    }
+
+                    // If the user is viewing Settings but has not started editing,
+                    // refresh the displayed values. Never override an active value editor
+                    // session or any in-progress user edits.
+                    if (page_ == Page::Settings && in_settings_edit_) {
+                        const bool safe_to_refresh_list = (!settings_dirty_) && (!settings_value_editor_active_) && (settings_popup_mode_ == SettingsPopupMode::None);
+                        if (safe_to_refresh_list) {
+                            applyConfigToSettings_(edit_settings_, cfg);
+                            original_settings_ = edit_settings_;
+                        }
+                    }
+
                     dirty_ = true;
                 }
                 break;
             }
             case espnow::MsgType::CommandAck: {
                 logf_(now_ms, "RX: CommandAck");
+
+                // Live Counter: clear the pending "SENDING..." overlay on any ACK that
+                // arrives while a command is outstanding. CommandAck is not correlated,
+                // so we use timing heuristics similar to the reference remote.
+                if (pending_command_id_ != 0U) {
+                    if ((now_ms - pending_command_tick_) <= 3000U) {
+                        pending_command_id_ = 0U;
+                        pending_command_tick_ = 0U;
+                        dirty_ = true;
+                    }
+                }
 
                 // CommandAck has no payload and does not correlate to a specific command.
                 // We treat an ACK arriving while waiting as an ACK for our pending action.
@@ -405,7 +486,17 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
         encoder_pos_ = encoder_.getPosition();
     }
 
-    // Button click via M5Unified.
+    // Button actions via M5Unified.
+    // In the Settings value editor: long-press cycles step size (for float editors) instead of finishing.
+    if (page_ == Page::Settings && settings_value_editor_active_) {
+        if (settings_editor_type_ == SettingsEditorValueType::F32 && M5.BtnA.wasReleasedAfterHold()) {
+            cycleSettingsEditorStep_();
+            playBeep_(1);
+            dirty_ = true;
+            return;
+        }
+    }
+
     if (M5.BtnA.wasClicked()) {
         onClick_(now_ms);
     }
@@ -418,11 +509,8 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
         if (t.wasPressed()) {
             touch_start_x_ = t.x;
             touch_start_y_ = t.y;
+            touch_start_ms_ = now_ms;
             swipe_detected_ = false;
-        }
-        
-        if (t.wasClicked() && !swipe_detected_) {
-            onTouchClick_(t.x, t.y, now_ms);
         }
         
         if (t.wasDragStart()) {
@@ -451,8 +539,24 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
             const int16_t total_dy = t.y - touch_start_y_;
             onSwipe_(total_dx, total_dy, now_ms);
         }
-        
-        if (t.wasDragged() || t.wasReleased()) {
+
+        // Robust click detection: treat a press+release with minimal movement as a click.
+        // This is more reliable than relying solely on M5Unified's wasClicked(), which can
+        // be missed if the touch jitters slightly.
+        if (t.wasReleased() && !swipe_detected_) {
+            const int16_t dx = t.x - touch_start_x_;
+            const int16_t dy = t.y - touch_start_y_;
+            const int32_t dist2 = static_cast<int32_t>(dx) * dx + static_cast<int32_t>(dy) * dy;
+            const uint32_t held_ms = now_ms - touch_start_ms_;
+
+            if (dist2 <= (12 * 12) && held_ms <= 500U) {
+                onTouchClick_(t.x, t.y, now_ms);
+            }
+        }
+
+        // Only clear dragging state on release; clearing on every `wasDragged()` makes
+        // gesture handling sporadic.
+        if (t.wasReleased()) {
             touch_dragging_ = false;
         }
     } else {
@@ -469,17 +573,6 @@ void ui::UiController::nextPage_(int delta) noexcept
 void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
 {
     (void)now_ms;
-
-    auto clamp_add_u32 = [](uint32_t value, int delta_steps, uint32_t step) -> uint32_t {
-        const int64_t next = static_cast<int64_t>(value) + static_cast<int64_t>(delta_steps) * static_cast<int64_t>(step);
-        if (next < 0) {
-            return 0;
-        }
-        if (next > static_cast<int64_t>(UINT32_MAX)) {
-            return UINT32_MAX;
-        }
-        return static_cast<uint32_t>(next);
-    };
 
     // Page-specific behavior.
     if (page_ == Page::Settings) {
@@ -502,15 +595,18 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         }
 
         // Otherwise rotation moves selection within current category.
-        int item_count = 4;
-        switch (settings_category_) {
-            case SettingsCategory::Main: item_count = 4; break;
-            case SettingsCategory::FatigueTest: item_count = 4; break;
-            case SettingsCategory::BoundsFinding: item_count = 6; break;
-            case SettingsCategory::UI: item_count = 3; break;
-        }
-
+        const int item_count = getSettingsItemCount_();
         settings_index_ = std::clamp(settings_index_ + delta, 0, item_count - 1);
+
+        // Persist last non-back selection per submenu.
+        if (settings_index_ > 0) {
+            switch (settings_category_) {
+                case SettingsCategory::FatigueTest: settings_last_fatigue_index_ = settings_index_; break;
+                case SettingsCategory::BoundsFinding: settings_last_bounds_index_ = settings_index_; break;
+                case SettingsCategory::UI: settings_last_ui_index_ = settings_index_; break;
+                case SettingsCategory::Main: break;
+            }
+        }
         dirty_ = true;
         return;
     }
@@ -561,6 +657,14 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
             scroll_lines_ = desired;
         }
         dirty_ = true;
+        return;
+    }
+
+    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::None) {
+        if (delta != 0) {
+            live_focus_ = (live_focus_ == LiveFocus::Actions) ? LiveFocus::Back : LiveFocus::Actions;
+            dirty_ = true;
+        }
         return;
     }
 
@@ -636,7 +740,7 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
                 settingsBack_();
             } else {
                 settings_category_ = SettingsCategory::Main;
-                settings_index_ = 0;
+                settings_index_ = settings_return_main_index_;
             }
             dirty_ = true;
             return;
@@ -644,13 +748,22 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
 
         // Main: enter sub-category.
         if (settings_category_ == SettingsCategory::Main) {
+            settings_return_main_index_ = settings_index_;
             switch (settings_index_) {
                 case 1: settings_category_ = SettingsCategory::FatigueTest; break;
                 case 2: settings_category_ = SettingsCategory::BoundsFinding; break;
                 case 3: settings_category_ = SettingsCategory::UI; break;
                 default: break;
             }
-            settings_index_ = 1;
+            // Restore last selection inside the submenu (avoid jumping to "< Back").
+            switch (settings_category_) {
+                case SettingsCategory::FatigueTest: settings_index_ = std::max(1, settings_last_fatigue_index_); break;
+                case SettingsCategory::BoundsFinding: settings_index_ = std::max(1, settings_last_bounds_index_); break;
+                case SettingsCategory::UI: settings_index_ = std::max(1, settings_last_ui_index_); break;
+                default: settings_index_ = 1; break;
+            }
+            // Clamp to the submenu bounds in case menu size changed.
+            settings_index_ = std::min(settings_index_, getSettingsItemCount_() - 1);
             dirty_ = true;
             return;
         }
@@ -685,6 +798,32 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
     }
 
     if (page_ == Page::LiveCounter) {
+        // Encoder navigation: allow selecting Back vs Actions without touch.
+        if (live_popup_mode_ == LivePopupMode::None && live_focus_ == LiveFocus::Back) {
+            const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+
+            // Safety: do not exit while running/paused. Instead, open the actions popup.
+            if (test_state == fatigue_proto::TestState::Running) {
+                live_popup_mode_ = LivePopupMode::RunningActions;
+                live_popup_selection_ = 0; // Back
+                playBeep_(2);
+                dirty_ = true;
+                return;
+            }
+            if (test_state == fatigue_proto::TestState::Paused) {
+                live_popup_mode_ = LivePopupMode::PausedActions;
+                live_popup_selection_ = 0; // Back
+                playBeep_(2);
+                dirty_ = true;
+                return;
+            }
+
+            page_ = Page::Landing;
+            playBeep_(2);
+            dirty_ = true;
+            return;
+        }
+
         // Handle popup if active
         if (live_popup_mode_ != LivePopupMode::None) {
             handleLivePopupInput_(0, true, now_ms);
@@ -720,7 +859,10 @@ void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noex
 {
     // Global back button (for non-landing pages).
     if (page_ != Page::Landing && page_ != Page::Bounds) {
-        const Rect back_btn{ 10, 8, 70, 34 };
+        // LiveCounter: place Back inside circular safe area (top corners are clipped).
+        const Rect back_btn = (page_ == Page::LiveCounter)
+            ? Rect{ 76, 10, 88, 30 }
+            : Rect{ 10, 8, 70, 34 };
         if (back_btn.contains(x, y)) {
             // Special case: settings back should discard edits.
             if (page_ == Page::Settings) {
@@ -762,8 +904,9 @@ void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noex
     }
 
     if (page_ == Page::Bounds) {
-        const Rect back_btn{ 18, 190, 64, 32 };
-        const Rect action_btn{ 90, 190, 132, 32 };
+        // Slightly higher to avoid bottom-edge clipping on the round display.
+        const Rect back_btn{ 18, 186, 64, 30 };
+        const Rect action_btn{ 90, 186, 132, 30 };
         if (action_btn.contains(x, y)) {
             bounds_focus_ = BoundsFocus::Action;
             onClick_(now_ms);
@@ -825,7 +968,7 @@ void ui::UiController::onTouchDrag_(int16_t delta_y, uint32_t now_ms) noexcept
     if (page_ == Page::Settings) {
         // Scroll settings list
         settings_scroll_offset_ -= delta_y / 4;
-        settings_scroll_offset_ = std::max(0, std::min(settings_scroll_offset_, 6 * kSettingsItemHeight_));
+        settings_scroll_offset_ = std::max(0, std::min(settings_scroll_offset_, 7 * kSettingsItemHeight_));
         dirty_ = true;
     }
 }
@@ -834,6 +977,15 @@ void ui::UiController::onSwipe_(int16_t dx, int16_t dy, uint32_t now_ms) noexcep
 {
     (void)dy;
     (void)now_ms;
+
+    // Live Counter: while actively running/paused, avoid accidental exits via swipe.
+    // Back button remains the explicit exit path.
+    if (page_ == Page::LiveCounter && have_status_) {
+        const auto st = static_cast<fatigue_proto::TestState>(last_status_.state);
+        if (st == fatigue_proto::TestState::Running || st == fatigue_proto::TestState::Paused) {
+            return;
+        }
+    }
     
     // Swipe left to go back (on non-landing pages)
     if (page_ != Page::Landing && dx < -60) {
@@ -865,11 +1017,18 @@ void ui::UiController::enterSettings_() noexcept
         return;
     }
     edit_settings_ = *settings_;
+    original_settings_ = edit_settings_;
     in_settings_edit_ = true;
+    settings_dirty_ = false;
     settings_index_ = 0;
     settings_category_ = SettingsCategory::Main;
+    settings_return_main_index_ = 0;
     settings_focus_ = SettingsFocus::List;
     settings_value_editing_ = false;
+
+    settings_last_fatigue_index_ = 1;
+    settings_last_bounds_index_ = 1;
+    settings_last_ui_index_ = 1;
 
     settings_popup_mode_ = SettingsPopupMode::None;
     settings_popup_selection_ = 0;
@@ -884,10 +1043,34 @@ void ui::UiController::enterSettings_() noexcept
     settings_target_offset_ = 0.0f;
 }
 
+int ui::UiController::getSettingsItemCount_() const noexcept
+{
+    switch (settings_category_) {
+        case SettingsCategory::Main: return 4;
+        case SettingsCategory::FatigueTest: return 5;     // Back, Cycles, VMAX, AMAX, Dwell
+        case SettingsCategory::BoundsFinding: return 7;   // Back + 6 items
+        case SettingsCategory::UI: return 2;              // Back, Brightness
+        default: return 4;
+    }
+}
+
 void ui::UiController::settingsBack_() noexcept
 {
+    // If there are pending changes, confirm before leaving Settings.
+    if (settings_dirty_ && settings_popup_mode_ == SettingsPopupMode::None) {
+        settings_popup_mode_ = SettingsPopupMode::SaveConfirm;
+        settings_popup_selection_ = 0; // default SEND
+        dirty_ = true;
+        return;
+    }
+
     // Discard changes, return to landing.
+    if (settings_ != nullptr) {
+        // Restore previewed brightness.
+        M5.Display.setBrightness(settings_->ui.brightness);
+    }
     in_settings_edit_ = false;
+    settings_dirty_ = false;
     settings_value_editing_ = false;
     settings_category_ = SettingsCategory::Main;
     settings_index_ = 0;
@@ -912,12 +1095,17 @@ void ui::UiController::settingsSave_(uint32_t now_ms) noexcept
     // Apply brightness setting
     M5.Display.setBrightness(settings_->ui.brightness);
 
-    // Push config to test unit.
-    const auto payload = fatigue_proto::BuildConfigPayload(*settings_);
-    (void)espnow::SendConfigSet(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_, &payload, sizeof(payload));
-    logf_(now_ms, "TX: ConfigSet dev=%u", fatigue_proto::DEVICE_ID_FATIGUE_TESTER_);
+    // Push config to test unit (only meaningful while connected).
+    if (conn_status_ == ConnStatus::Connected) {
+        const auto payload = fatigue_proto::BuildConfigPayload(*settings_);
+        (void)espnow::SendConfigSet(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_, &payload, sizeof(payload));
+        logf_(now_ms, "TX: ConfigSet dev=%u", fatigue_proto::DEVICE_ID_FATIGUE_TESTER_);
+    } else {
+        logf_(now_ms, "TX: ConfigSet skipped (not connected)");
+    }
 
     in_settings_edit_ = false;
+    settings_dirty_ = false;
     settings_value_editing_ = false;
     settings_popup_mode_ = SettingsPopupMode::None;
     settings_value_editor_active_ = false;
@@ -953,6 +1141,7 @@ bool ui::UiController::settingsEditorHasChange_() const noexcept
         case SettingsEditorValueType::F32: return settings_editor_f32_new_ != settings_editor_f32_old_;
         case SettingsEditorValueType::Bool: return settings_editor_bool_new_ != settings_editor_bool_old_;
         case SettingsEditorValueType::U8: return settings_editor_u8_new_ != settings_editor_u8_old_;
+        case SettingsEditorValueType::I8: return settings_editor_i8_new_ != settings_editor_i8_old_;
         default: return false;
     }
 }
@@ -964,6 +1153,7 @@ void ui::UiController::discardSettingsEditorValue_() noexcept
         case SettingsEditorValueType::F32: settings_editor_f32_new_ = settings_editor_f32_old_; break;
         case SettingsEditorValueType::Bool: settings_editor_bool_new_ = settings_editor_bool_old_; break;
         case SettingsEditorValueType::U8: settings_editor_u8_new_ = settings_editor_u8_old_; break;
+        case SettingsEditorValueType::I8: settings_editor_i8_new_ = settings_editor_i8_old_; break;
         default: break;
     }
 }
@@ -976,10 +1166,21 @@ void ui::UiController::applySettingsEditorValue_() noexcept
             if (settings_editor_type_ == SettingsEditorValueType::U32) {
                 if (settings_editor_index_ == 1) {
                     edit_settings_.test_unit.cycle_amount = settings_editor_u32_new_;
-                } else if (settings_editor_index_ == 2) {
-                    edit_settings_.test_unit.time_per_cycle_sec = settings_editor_u32_new_;
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 4) {
+                    // Dwell time (edited in 0.5s increments, stored as ms) - index 4 in new layout
+                    edit_settings_.test_unit.dwell_time_ms = settings_editor_u32_new_ * 500u;
+                    settings_dirty_ = true;
+                }
+            } else if (settings_editor_type_ == SettingsEditorValueType::F32) {
+                if (settings_editor_index_ == 2) {
+                    // VMAX (RPM) - index 2 in new layout
+                    edit_settings_.test_unit.oscillation_vmax_rpm = std::max(5.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 } else if (settings_editor_index_ == 3) {
-                    edit_settings_.test_unit.dwell_time_sec = settings_editor_u32_new_;
+                    // AMAX (rev/s²) - index 3 in new layout
+                    edit_settings_.test_unit.oscillation_amax_rev_s2 = std::max(0.5f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 }
             }
             break;
@@ -987,15 +1188,23 @@ void ui::UiController::applySettingsEditorValue_() noexcept
         case SettingsCategory::BoundsFinding:
             if (settings_editor_index_ == 1 && settings_editor_type_ == SettingsEditorValueType::Bool) {
                 edit_settings_.test_unit.bounds_method_stallguard = settings_editor_bool_new_;
+                settings_dirty_ = true;
+            } else if (settings_editor_index_ == 4 && settings_editor_type_ == SettingsEditorValueType::I8) {
+                edit_settings_.test_unit.stallguard_sgt = settings_editor_i8_new_;
+                settings_dirty_ = true;
             } else if (settings_editor_type_ == SettingsEditorValueType::F32) {
                 if (settings_editor_index_ == 2) {
                     edit_settings_.test_unit.bounds_search_velocity_rpm = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 } else if (settings_editor_index_ == 3) {
                     edit_settings_.test_unit.stallguard_min_velocity_rpm = std::max(0.0f, settings_editor_f32_new_);
-                } else if (settings_editor_index_ == 4) {
-                    edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 } else if (settings_editor_index_ == 5) {
+                    edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 6) {
                     edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 }
             }
             break;
@@ -1005,8 +1214,7 @@ void ui::UiController::applySettingsEditorValue_() noexcept
                 edit_settings_.ui.brightness = settings_editor_u8_new_;
                 // Preview immediately
                 M5.Display.setBrightness(edit_settings_.ui.brightness);
-            } else if (settings_editor_index_ == 2 && settings_editor_type_ == SettingsEditorValueType::Bool) {
-                edit_settings_.ui.orientation_flipped = settings_editor_bool_new_;
+                settings_dirty_ = true;
             }
             break;
 
@@ -1025,20 +1233,38 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
     settings_editor_index_ = settings_index_;
     settings_editor_type_ = SettingsEditorValueType::None;
 
+    auto round1 = [](float v) -> float {
+        return std::round(v * 10.0f) / 10.0f;
+    };
+
     // Snapshot the current value for the selected item.
+    // PROTOCOL V2: Menu layout is: 1=Cycles, 2=VMAX, 3=AMAX, 4=Dwell
     switch (settings_category_) {
         case SettingsCategory::FatigueTest:
-            settings_editor_type_ = SettingsEditorValueType::U32;
             if (settings_index_ == 1) {
+                // Cycles (U32)
+                settings_editor_type_ = SettingsEditorValueType::U32;
                 settings_editor_u32_old_ = edit_settings_.test_unit.cycle_amount;
+                settings_editor_u32_new_ = settings_editor_u32_old_;
             } else if (settings_index_ == 2) {
-                settings_editor_u32_old_ = edit_settings_.test_unit.time_per_cycle_sec;
+                // VMAX (F32 RPM)
+                settings_editor_type_ = SettingsEditorValueType::F32;
+                settings_editor_f32_old_ = round1(edit_settings_.test_unit.oscillation_vmax_rpm);
+                settings_editor_f32_new_ = settings_editor_f32_old_;
+                initSettingsEditorStep_();
             } else if (settings_index_ == 3) {
-                settings_editor_u32_old_ = edit_settings_.test_unit.dwell_time_sec;
-            } else {
-                settings_editor_u32_old_ = 0;
+                // AMAX (F32 rev/s²)
+                settings_editor_type_ = SettingsEditorValueType::F32;
+                settings_editor_f32_old_ = round1(edit_settings_.test_unit.oscillation_amax_rev_s2);
+                settings_editor_f32_new_ = settings_editor_f32_old_;
+                initSettingsEditorStep_();
+            } else if (settings_index_ == 4) {
+                // Dwell (edited in 0.5s increments, stored as ms)
+                settings_editor_type_ = SettingsEditorValueType::U32;
+                // Represent dwell in half-seconds to allow 0.5s encoder steps.
+                settings_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 250u) / 500u;
+                settings_editor_u32_new_ = settings_editor_u32_old_;
             }
-            settings_editor_u32_new_ = settings_editor_u32_old_;
             break;
 
         case SettingsCategory::BoundsFinding:
@@ -1046,20 +1272,25 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 settings_editor_type_ = SettingsEditorValueType::Bool;
                 settings_editor_bool_old_ = edit_settings_.test_unit.bounds_method_stallguard;
                 settings_editor_bool_new_ = settings_editor_bool_old_;
+            } else if (settings_index_ == 4) {
+                settings_editor_type_ = SettingsEditorValueType::I8;
+                settings_editor_i8_old_ = edit_settings_.test_unit.stallguard_sgt;
+                settings_editor_i8_new_ = settings_editor_i8_old_;
             } else {
                 settings_editor_type_ = SettingsEditorValueType::F32;
                 if (settings_index_ == 2) {
-                    settings_editor_f32_old_ = edit_settings_.test_unit.bounds_search_velocity_rpm;
+                    settings_editor_f32_old_ = round1(edit_settings_.test_unit.bounds_search_velocity_rpm);
                 } else if (settings_index_ == 3) {
-                    settings_editor_f32_old_ = edit_settings_.test_unit.stallguard_min_velocity_rpm;
-                } else if (settings_index_ == 4) {
-                    settings_editor_f32_old_ = edit_settings_.test_unit.stall_detection_current_factor;
+                    settings_editor_f32_old_ = round1(edit_settings_.test_unit.stallguard_min_velocity_rpm);
                 } else if (settings_index_ == 5) {
-                    settings_editor_f32_old_ = edit_settings_.test_unit.bounds_search_accel_rev_s2;
+                    settings_editor_f32_old_ = round1(edit_settings_.test_unit.stall_detection_current_factor);
+                } else if (settings_index_ == 6) {
+                    settings_editor_f32_old_ = round1(edit_settings_.test_unit.bounds_search_accel_rev_s2);
                 } else {
                     settings_editor_f32_old_ = 0.0f;
                 }
                 settings_editor_f32_new_ = settings_editor_f32_old_;
+                initSettingsEditorStep_();
             }
             break;
 
@@ -1068,10 +1299,6 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 settings_editor_type_ = SettingsEditorValueType::U8;
                 settings_editor_u8_old_ = edit_settings_.ui.brightness;
                 settings_editor_u8_new_ = settings_editor_u8_old_;
-            } else if (settings_index_ == 2) {
-                settings_editor_type_ = SettingsEditorValueType::Bool;
-                settings_editor_bool_old_ = edit_settings_.ui.orientation_flipped;
-                settings_editor_bool_new_ = settings_editor_bool_old_;
             }
             break;
 
@@ -1104,11 +1331,9 @@ void ui::UiController::handleSettingsValueEdit_(int delta) noexcept
             break;
         }
         case SettingsEditorValueType::F32: {
-            float step = 0.1f;
-            if (settings_editor_category_ == SettingsCategory::BoundsFinding && settings_editor_index_ == 4) {
-                step = 0.05f;
-            }
-            settings_editor_f32_new_ = std::max(0.0f, settings_editor_f32_new_ + step * static_cast<float>(delta));
+            const float step = std::max(0.0001f, settings_editor_f32_step_);
+            const float next = std::max(0.0f, settings_editor_f32_new_ + step * static_cast<float>(delta));
+            settings_editor_f32_new_ = std::round(next * 10.0f) / 10.0f;
             break;
         }
         case SettingsEditorValueType::Bool:
@@ -1123,9 +1348,92 @@ void ui::UiController::handleSettingsValueEdit_(int delta) noexcept
             }
             break;
         }
+        case SettingsEditorValueType::I8: {
+            // SGT: allow [-64, 63] plus 127="Default".
+            auto next_sgt = [](int8_t current, int dir) -> int8_t {
+                if (dir == 0) return current;
+
+                if (current == 127) {
+                    return (dir > 0) ? static_cast<int8_t>(-64) : static_cast<int8_t>(63);
+                }
+
+                const int next = static_cast<int>(current) + dir;
+                if (next > 63) return 127;
+                if (next < -64) return 127;
+                return static_cast<int8_t>(next);
+            };
+
+            settings_editor_i8_new_ = next_sgt(settings_editor_i8_new_, (delta > 0) ? 1 : -1);
+            break;
+        }
         default:
             break;
     }
+}
+
+void ui::UiController::getSettingsEditorF32StepOptions_(const float*& steps, size_t& count) const noexcept
+{
+    // Uniform float editor steps across all float settings:
+    // user wants: 0.1, 1, 10 (no finer than one decimal place).
+    static constexpr float kSteps[] = {0.1f, 1.0f, 10.0f};
+    steps = kSteps;
+    count = sizeof(kSteps) / sizeof(kSteps[0]);
+}
+
+void ui::UiController::initSettingsEditorStep_() noexcept
+{
+    if (settings_editor_type_ != SettingsEditorValueType::F32) {
+        return;
+    }
+
+    const float* steps = nullptr;
+    size_t count = 0;
+    getSettingsEditorF32StepOptions_(steps, count);
+    if (steps == nullptr || count == 0) {
+        settings_editor_f32_step_ = 0.1f;
+        return;
+    }
+
+    // Choose a sensible default per field (matches the first "preferred" choice in the step array).
+    // RPM arrays are {0.1, 1, 10} -> default 1
+    // rev/s^2 arrays are {0.01, 0.1, 1} -> default 0.1
+    // stall factor arrays are {0.01, 0.05, 0.1, 0.5} -> default 0.05
+    if (count >= 2) {
+        settings_editor_f32_step_ = steps[1];
+    } else {
+        settings_editor_f32_step_ = steps[0];
+    }
+}
+
+void ui::UiController::cycleSettingsEditorStep_() noexcept
+{
+    if (settings_editor_type_ != SettingsEditorValueType::F32) {
+        return;
+    }
+
+    const float* steps = nullptr;
+    size_t count = 0;
+    getSettingsEditorF32StepOptions_(steps, count);
+    if (steps == nullptr || count == 0) {
+        return;
+    }
+
+    // Find current step in the option list, then advance.
+    size_t idx = 0;
+    const float cur = settings_editor_f32_step_;
+    bool found = false;
+    for (size_t i = 0; i < count; ++i) {
+        if (std::fabs(static_cast<double>(steps[i] - cur)) < 1e-6) {
+            idx = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        idx = 0;
+    }
+    idx = (idx + 1) % count;
+    settings_editor_f32_step_ = steps[idx];
 }
 
 void ui::UiController::handleSettingsPopupInput_(int delta, bool click, uint32_t now_ms) noexcept
@@ -1134,7 +1442,7 @@ void ui::UiController::handleSettingsPopupInput_(int delta, bool click, uint32_t
         return;
     }
 
-    const int max_sel = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) ? 1 : 2;
+    const int max_sel = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm || settings_popup_mode_ == SettingsPopupMode::SaveConfirm) ? 1 : 2;
 
     if (delta != 0) {
         const int next = static_cast<int>(settings_popup_selection_) + (delta > 0 ? 1 : -1);
@@ -1169,20 +1477,40 @@ void ui::UiController::handleSettingsPopupInput_(int delta, bool click, uint32_t
         return;
     }
 
-    // SaveConfirm (legacy): 0=SAVE, 1=DISCARD, 2=CANCEL
-    if (settings_popup_selection_ == 0) {
-        settingsSave_(now_ms);
-        return;
-    }
-    if (settings_popup_selection_ == 1) {
-        settingsBack_();
-        return;
-    }
+    // SaveConfirm: leaving Settings with unsent changes.
+    // 0=SEND, 1=RESYNC (discard local edits and show machine config)
+    if (settings_popup_mode_ == SettingsPopupMode::SaveConfirm) {
+        if (settings_popup_selection_ == 0) {
+            if (conn_status_ != ConnStatus::Connected) {
+                playBeep_(1);
+                logf_(now_ms, "UI: not connected - cannot send changes");
+                dirty_ = true;
+                return;
+            }
+            settingsSave_(now_ms);
+            return;
+        }
 
-    // Cancel
-    settings_popup_mode_ = SettingsPopupMode::None;
-    settings_popup_selection_ = 0;
-    dirty_ = true;
+        // RESYNC: discard edits and return to landing.
+        if (settings_ != nullptr) {
+            edit_settings_ = *settings_;
+            original_settings_ = edit_settings_;
+            M5.Display.setBrightness(settings_->ui.brightness);
+        }
+
+        in_settings_edit_ = false;
+        settings_dirty_ = false;
+        settings_value_editing_ = false;
+        settings_category_ = SettingsCategory::Main;
+        settings_index_ = 0;
+        settings_popup_mode_ = SettingsPopupMode::None;
+        settings_popup_selection_ = 0;
+        settings_value_editor_active_ = false;
+        settings_editor_type_ = SettingsEditorValueType::None;
+        page_ = Page::Landing;
+        dirty_ = true;
+        return;
+    }
 }
 
 void ui::UiController::drawHeader_(const char* title) noexcept
@@ -1491,51 +1819,59 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
     // Draw tag/label in center
     drawCircularMenuTag_(now_ms);
     
-    // Status hint area (bottom arc) - centered for round screen
+    // Status hint (below center tag): keep it away from carousel icons.
+    // The icon ring radius is ~95px; a bottom-edge label can overlap whichever
+    // icon is currently at the bottom (often interpreted as being “on” that icon).
+    const int16_t status_center_y = static_cast<int16_t>(cy + 56);
+    constexpr int16_t kPillH = 18;
+    constexpr int16_t kPillPadX = 10;
+    constexpr int16_t kPillTextY = 5;
+    constexpr uint16_t kPillFill = 0x2104; // subtle dark fill (matches outer ring)
+
+    auto draw_pill = [&](const char* text, uint16_t border_color, uint16_t text_color) {
+        canvas_->setTextSize(1);
+        const int16_t tw = static_cast<int16_t>(canvas_->textWidth(text));
+        const int16_t pill_w = static_cast<int16_t>(tw + (kPillPadX * 2));
+        const int16_t pill_x = static_cast<int16_t>(cx - (pill_w / 2));
+        const int16_t pill_y = static_cast<int16_t>(status_center_y - (kPillH / 2));
+        canvas_->fillRoundRect(pill_x, pill_y, pill_w, kPillH, 9, kPillFill);
+        canvas_->drawRoundRect(pill_x, pill_y, pill_w, kPillH, 9, border_color);
+        canvas_->setTextColor(text_color);
+        canvas_->setCursor(static_cast<int16_t>(pill_x + kPillPadX), static_cast<int16_t>(pill_y + kPillTextY));
+        canvas_->print(text);
+    };
+
     if (have_status_) {
-        // Show state indicator centered at bottom
-        const char* state_str = "Idle";
-        uint16_t state_color = TFT_DARKGREY;
+        const char* state_str = "IDLE";
+        uint16_t state_color = colors::state_idle;
         switch (static_cast<fatigue_proto::TestState>(last_status_.state)) {
             case fatigue_proto::TestState::Running:
-                state_str = "Running";
-                state_color = 0x07E0;  // Green
+                state_str = "RUNNING";
+                state_color = colors::state_running;
                 break;
             case fatigue_proto::TestState::Paused:
-                state_str = "Paused";
-                state_color = 0xFFE0;  // Yellow
+                state_str = "PAUSED";
+                state_color = colors::state_paused;
                 break;
             case fatigue_proto::TestState::Error:
-                state_str = "Error";
-                state_color = 0xF800;  // Red
+                state_str = "ERROR";
+                state_color = colors::state_error;
                 break;
             default:
                 break;
         }
-        
-        // Centered status with cycle count
-        canvas_->setTextSize(1);
+
         char status_buf[32];
         snprintf(status_buf, sizeof(status_buf), "%s #%" PRIu32, state_str, last_status_.cycle_number);
-        canvas_->setTextColor(state_color);
-        const int16_t tw = static_cast<int16_t>(canvas_->textWidth(status_buf));
-        canvas_->setCursor(cx - tw / 2, 240 - 26);
-        canvas_->print(status_buf);
+        draw_pill(status_buf, state_color, state_color);
     } else if (conn_status_ == ConnStatus::Connecting) {
         // Animated connecting indicator (dots)
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(0x8410);
-        
-        // Animate dots based on time
         const int dot_count = ((now_ms / 500) % 4);
-        char conn_buf[16] = "Waiting";
+        char conn_buf[20] = "WAITING";
         for (int i = 0; i < dot_count; ++i) {
             strncat(conn_buf, ".", sizeof(conn_buf) - strlen(conn_buf) - 1);
         }
-        
-        const int16_t tw = static_cast<int16_t>(canvas_->textWidth(conn_buf));
-        canvas_->setCursor(cx - tw / 2, 240 - 26);
-        canvas_->print(conn_buf);
+        draw_pill(conn_buf, 0x8410, 0xAD55);
     }
     // When disconnected, connection indicator dot (red) is enough - no text needed
 }
@@ -1581,16 +1917,16 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     
     // Main menu labels
     static const char* main_labels[] = {"< Back", "Fatigue Test", "Bounds Finding", "UI Settings"};
-    static const char* main_values[] = {"Return to home", "Cycles & timing", "Stall detection", "Display options"};
+    static const char* main_values[] = {"Return to home", "Motion settings", "Stall detection", "Display options"};
     
-    // Fatigue Test labels
-    static const char* fatigue_labels[] = {"< Back", "Cycles", "Time/Cycle", "Dwell Time"};
+    // Fatigue Test labels - PROTOCOL V2: velocity/acceleration control
+    static const char* fatigue_labels[] = {"< Back", "Cycles", "VMAX (RPM)", kLabelAmaxRevPerS2Ui, "Dwell (s)"};
     
     // Bounds Finding labels
-    static const char* bounds_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "Stall Factor", "Search Accel"};
+    static const char* bounds_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "SGT", "Stall Factor", "Search Accel"};
     
     // UI labels
-    static const char* ui_labels[] = {"< Back", "Brightness", "Flip Display"};
+    static const char* ui_labels[] = {"< Back", "Brightness"};
     
     switch (settings_category_) {
         case SettingsCategory::Main:
@@ -1604,42 +1940,52 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             
         case SettingsCategory::FatigueTest:
             title = "FATIGUE TEST";
-            item_count = 4;
+            item_count = 5;  // Back, Cycles, VMAX, AMAX, Dwell
             for (int i = 0; i < item_count; ++i) labels[i] = fatigue_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%" PRIu32, edit_settings_.test_unit.cycle_amount);
-            snprintf(values[2], sizeof(values[2]), "%" PRIu32 " s", edit_settings_.test_unit.time_per_cycle_sec);
-            snprintf(values[3], sizeof(values[3]), "%" PRIu32 " s", edit_settings_.test_unit.dwell_time_sec);
+            snprintf(values[2], sizeof(values[2]), "%.1f", static_cast<double>(edit_settings_.test_unit.oscillation_vmax_rpm));
+            snprintf(values[3], sizeof(values[3]), "%.1f", static_cast<double>(edit_settings_.test_unit.oscillation_amax_rev_s2));
+            if ((edit_settings_.test_unit.dwell_time_ms % 1000u) == 0u) {
+                snprintf(values[4], sizeof(values[4]), "%" PRIu32, (edit_settings_.test_unit.dwell_time_ms / 1000u));
+            } else {
+                snprintf(values[4], sizeof(values[4]), "%.1f", static_cast<double>(edit_settings_.test_unit.dwell_time_ms) / 1000.0);
+            }
             break;
             
         case SettingsCategory::BoundsFinding:
             title = "BOUNDS";
-            item_count = 6;
+            item_count = 7;
             for (int i = 0; i < item_count; ++i) labels[i] = bounds_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%s", edit_settings_.test_unit.bounds_method_stallguard ? "StallGuard" : "Encoder");
             snprintf(values[2], sizeof(values[2]), "%.1f rpm", static_cast<double>(edit_settings_.test_unit.bounds_search_velocity_rpm));
             snprintf(values[3], sizeof(values[3]), "%.1f rpm", static_cast<double>(edit_settings_.test_unit.stallguard_min_velocity_rpm));
-            snprintf(values[4], sizeof(values[4]), "%.2fx", static_cast<double>(edit_settings_.test_unit.stall_detection_current_factor));
-            snprintf(values[5], sizeof(values[5]), "%.1f rev/s^2", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2));
+            if (edit_settings_.test_unit.stallguard_sgt == 127) {
+                snprintf(values[4], sizeof(values[4]), "%s", "Default");
+            } else {
+                snprintf(values[4], sizeof(values[4]), "%d", static_cast<int>(edit_settings_.test_unit.stallguard_sgt));
+            }
+            snprintf(values[5], sizeof(values[5]), "%.1fx", static_cast<double>(edit_settings_.test_unit.stall_detection_current_factor));
+            snprintf(values[6], sizeof(values[6]), "%.1f %s", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2), kUnitRevPerS2Ui);
             break;
             
         case SettingsCategory::UI:
             title = "UI SETTINGS";
-            item_count = 3;
+            item_count = 2;
             for (int i = 0; i < item_count; ++i) labels[i] = ui_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%d%%", static_cast<int>(edit_settings_.ui.brightness * 100 / 255));
-            snprintf(values[2], sizeof(values[2]), "%s", edit_settings_.ui.orientation_flipped ? "Yes" : "No");
             break;
     }
     
     // === DRAW MENU ITEMS (all drawing to canvas_ for flicker-free) ===
+    constexpr int16_t header_h = 54;
     for (int i = 0; i < item_count; ++i) {
         const float item_y_offset = (static_cast<float>(i) * kSettingsItemHeight_) - settings_anim_offset_;
         const int16_t item_y = menu_center_y + static_cast<int16_t>(item_y_offset);
-        
-        if (item_y < 48 || item_y > 192) continue;
+
+        if (item_y < (header_h + 4) || item_y > 192) continue;
         
         const bool selected = (settings_index_ == i);
         const bool is_category = (settings_category_ == SettingsCategory::Main && i > 0);
@@ -1648,7 +1994,7 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
         // Draw item card - inline to use canvas_
         const int16_t card_x = 25;
         const int16_t card_w = 190;
-        const int16_t card_h = 36;
+        const int16_t card_h = 40;
         
         // Card background
         uint16_t bg_color = colors::bg_card;
@@ -1663,15 +2009,20 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
                                    editing ? TFT_WHITE : colors::accent_orange);
         }
         
-        // Label
-        canvas_->setTextSize(1);
+        // Label (larger)
+        canvas_->setTextSize(2);
         canvas_->setTextColor(selected ? TFT_WHITE : colors::text_primary);
-        canvas_->setCursor(card_x + 10, item_y - 10);
+        canvas_->setCursor(card_x + 10, item_y - 14);
         canvas_->print(labels[i]);
         
-        // Value
+        // Value: prefer larger for readability, but never allow it to overflow the card.
         canvas_->setTextColor(selected ? colors::accent_yellow : colors::text_secondary);
-        canvas_->setCursor(card_x + 10, item_y + 2);
+        canvas_->setTextSize(2);
+        int16_t vw = static_cast<int16_t>(canvas_->textWidth(values[i]));
+        if (vw > (card_w - 20)) {
+            canvas_->setTextSize(1);
+        }
+        canvas_->setCursor(card_x + 10, item_y + 4);
         canvas_->print(values[i]);
         
         // Draw chevron for categories (Main menu items 1-3)
@@ -1684,12 +2035,25 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     }
     
     // === TITLE (drawn after items for clean layering) ===
-    canvas_->fillRect(0, 0, 240, 42, lgfx::color565(15, 15, 20));
+    canvas_->fillRect(0, 0, 240, header_h, lgfx::color565(15, 15, 20));
     canvas_->setTextColor(0xFA7000);
-    canvas_->setTextSize(2);
-    const int16_t title_w = static_cast<int16_t>(canvas_->textWidth(title));
-    canvas_->setCursor(cx - title_w/2, 14);
-    canvas_->print(title);
+    {
+        // Fit title to circular safe area at y~26 (avoid clipping on round display)
+        const float r = 118.0f;
+        const float cy_safe = 120.0f;
+        const float dy = 26.0f - cy_safe;
+        const float half = std::sqrt(std::max(0.0f, r * r - dy * dy));
+        const int16_t max_w = static_cast<int16_t>(std::max(0.0f, (half * 2.0f) - 28.0f));
+
+        canvas_->setTextSize(2);
+        int16_t title_w = static_cast<int16_t>(canvas_->textWidth(title));
+        if (title_w > max_w) {
+            canvas_->setTextSize(1);
+            title_w = static_cast<int16_t>(canvas_->textWidth(title));
+        }
+        canvas_->setCursor(cx - title_w / 2, 12);
+        canvas_->print(title);
+    }
     
     // === SCROLL INDICATOR ===
     if (item_count > 4) {
@@ -1711,8 +2075,22 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     if (settings_category_ != SettingsCategory::Main) {
         canvas_->setTextSize(1);
         canvas_->setTextColor(colors::text_hint);
-        canvas_->setCursor(10, 35);
-        canvas_->print("Settings >");
+        const float r = 118.0f;
+        const float cy_safe = 120.0f;
+        const int16_t crumb_y = 34;
+        const float dy = (static_cast<float>(crumb_y) + 4.0f) - cy_safe; // ~text mid
+        const float half = std::sqrt(std::max(0.0f, r * r - dy * dy));
+        const int16_t max_w = static_cast<int16_t>(std::max(0.0f, (half * 2.0f) - 18.0f));
+
+        const char* crumb = "Settings >";
+        int16_t w = static_cast<int16_t>(canvas_->textWidth(crumb));
+        if (w > max_w) {
+            crumb = "Settings";
+            w = static_cast<int16_t>(canvas_->textWidth(crumb));
+        }
+
+        canvas_->setCursor(cx - w / 2, crumb_y);
+        canvas_->print(crumb);
     }
 }
 
@@ -1731,23 +2109,25 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
     const char* label = "";
     const char* unit = "";
     bool bool_is_mode = false;
+    bool unit_is_rev_per_s2 = false;
 
     switch (settings_editor_category_) {
         case SettingsCategory::FatigueTest:
             if (settings_editor_index_ == 1) { label = "Cycles"; }
-            else if (settings_editor_index_ == 2) { label = "Time/Cycle"; unit = "s"; }
-            else if (settings_editor_index_ == 3) { label = "Dwell Time"; unit = "s"; }
+            else if (settings_editor_index_ == 2) { label = "VMAX"; unit = "rpm"; }
+            else if (settings_editor_index_ == 3) { label = "AMAX"; unit = kUnitRevPerS2Ui; unit_is_rev_per_s2 = true; }
+            else if (settings_editor_index_ == 4) { label = "Dwell"; unit = "s"; }
             break;
         case SettingsCategory::BoundsFinding:
             if (settings_editor_index_ == 1) { label = "Mode"; bool_is_mode = true; }
             else if (settings_editor_index_ == 2) { label = "Search Speed"; unit = "rpm"; }
             else if (settings_editor_index_ == 3) { label = "SG Min Vel"; unit = "rpm"; }
-            else if (settings_editor_index_ == 4) { label = "Stall Factor"; unit = "x"; }
-            else if (settings_editor_index_ == 5) { label = "Search Accel"; unit = "rev/s^2"; }
+            else if (settings_editor_index_ == 4) { label = "SGT"; }
+            else if (settings_editor_index_ == 5) { label = "Stall Factor"; unit = "x"; }
+            else if (settings_editor_index_ == 6) { label = "Search Accel"; unit = kUnitRevPerS2Ui; unit_is_rev_per_s2 = true; }
             break;
         case SettingsCategory::UI:
             if (settings_editor_index_ == 1) { label = "Brightness"; unit = "%"; }
-            else if (settings_editor_index_ == 2) { label = "Flip Display"; }
             break;
         case SettingsCategory::Main:
             break;
@@ -1823,12 +2203,24 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
     // Old value line
     char old_buf[40] = {0};
     char new_buf[40] = {0};
+    char new_value_only[32] = {0};
     const bool has_unit = (unit[0] != '\0');
+    const bool render_unit_separately = has_unit && (unit_is_rev_per_s2 || strlen(unit) > 4);
     switch (settings_editor_type_) {
         case SettingsEditorValueType::U32:
-            if (has_unit) {
+            if (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 4) {
+                // Dwell: editor stores half-seconds; display as seconds with 0.5s resolution.
+                const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.5;
+                const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.5;
+                snprintf(old_buf, sizeof(old_buf), "Old: %.1f %s", old_s, unit);
+                snprintf(new_buf, sizeof(new_buf), "%.1f %s", new_s, unit);
+            } else if (has_unit) {
                 snprintf(old_buf, sizeof(old_buf), "Old: %" PRIu32 " %s", settings_editor_u32_old_, unit);
-                snprintf(new_buf, sizeof(new_buf), "%" PRIu32 " %s", settings_editor_u32_new_, unit);
+                if (render_unit_separately) {
+                    snprintf(new_value_only, sizeof(new_value_only), "%" PRIu32, settings_editor_u32_new_);
+                } else {
+                    snprintf(new_buf, sizeof(new_buf), "%" PRIu32 " %s", settings_editor_u32_new_, unit);
+                }
             } else {
                 snprintf(old_buf, sizeof(old_buf), "Old: %" PRIu32, settings_editor_u32_old_);
                 snprintf(new_buf, sizeof(new_buf), "%" PRIu32, settings_editor_u32_new_);
@@ -1836,13 +2228,29 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
             break;
         case SettingsEditorValueType::F32:
             if (has_unit) {
-                snprintf(old_buf, sizeof(old_buf), "Old: %.2f %s", static_cast<double>(settings_editor_f32_old_), unit);
-                snprintf(new_buf, sizeof(new_buf), "%.2f %s", static_cast<double>(settings_editor_f32_new_), unit);
+                snprintf(old_buf, sizeof(old_buf), "Old: %.1f %s", static_cast<double>(settings_editor_f32_old_), unit);
+                if (render_unit_separately) {
+                    snprintf(new_value_only, sizeof(new_value_only), "%.1f", static_cast<double>(settings_editor_f32_new_));
+                } else {
+                    snprintf(new_buf, sizeof(new_buf), "%.1f %s", static_cast<double>(settings_editor_f32_new_), unit);
+                }
             } else {
-                snprintf(old_buf, sizeof(old_buf), "Old: %.2f", static_cast<double>(settings_editor_f32_old_));
-                snprintf(new_buf, sizeof(new_buf), "%.2f", static_cast<double>(settings_editor_f32_new_));
+                snprintf(old_buf, sizeof(old_buf), "Old: %.1f", static_cast<double>(settings_editor_f32_old_));
+                snprintf(new_buf, sizeof(new_buf), "%.1f", static_cast<double>(settings_editor_f32_new_));
             }
             break;
+        case SettingsEditorValueType::I8: {
+            auto fmt = [](char* buf, size_t n, const char* prefix, int8_t v) {
+                if (v == 127) {
+                    snprintf(buf, n, "%sDefault", prefix);
+                } else {
+                    snprintf(buf, n, "%s%d", prefix, static_cast<int>(v));
+                }
+            };
+            fmt(old_buf, sizeof(old_buf), "Old: ", settings_editor_i8_old_);
+            fmt(new_buf, sizeof(new_buf), "", settings_editor_i8_new_);
+            break;
+        }
         case SettingsEditorValueType::Bool:
             if (bool_is_mode) {
                 snprintf(old_buf, sizeof(old_buf), "Old: %s", settings_editor_bool_old_ ? "StallGuard" : "Encoder");
@@ -1874,15 +2282,61 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
     // Big value
     canvas_->setTextSize(4);
     canvas_->setTextColor(colors::text_primary);
-    const int16_t vw = static_cast<int16_t>(canvas_->textWidth(new_buf));
-    canvas_->setCursor(cx - vw / 2, cy - 22);
-    canvas_->print(new_buf);
+    if (render_unit_separately && (new_value_only[0] != '\0')) {
+        const int16_t vw = static_cast<int16_t>(canvas_->textWidth(new_value_only));
+        canvas_->setCursor(cx - vw / 2, cy - 28);
+        canvas_->print(new_value_only);
+
+        // Unit line (smaller), avoids making "rev/s^2" huge.
+        // For rev/s^2 we draw a manual superscript to avoid missing glyphs rendering as '|'.
+        if (unit_is_rev_per_s2) {
+            const int16_t unit_y = static_cast<int16_t>(cy + 10);
+            canvas_->setTextColor(colors::text_hint);
+
+            canvas_->setTextSize(2);
+            const char* base = "rev/s";
+            const int16_t base_w = static_cast<int16_t>(canvas_->textWidth(base));
+            canvas_->setTextSize(1);
+            const int16_t exp_w = static_cast<int16_t>(canvas_->textWidth("2"));
+            const int16_t total_w = static_cast<int16_t>(base_w + exp_w);
+            const int16_t x0 = static_cast<int16_t>(cx - total_w / 2);
+
+            canvas_->setTextSize(2);
+            canvas_->setCursor(x0, unit_y);
+            canvas_->print(base);
+            canvas_->setTextSize(1);
+            canvas_->setCursor(static_cast<int16_t>(x0 + base_w), static_cast<int16_t>(unit_y - 4));
+            canvas_->print("2");
+        } else {
+            drawCenteredText_(cx, cy + 10, unit, colors::text_hint, 2);
+        }
+    } else {
+        const int16_t vw = static_cast<int16_t>(canvas_->textWidth(new_buf));
+        canvas_->setCursor(cx - vw / 2, cy - 22);
+        canvas_->print(new_buf);
+    }
 
     // Instructions
     canvas_->setTextSize(1);
     canvas_->setTextColor(colors::text_hint);
-    drawCenteredText_(cx, 196, "Rotate to change", colors::text_hint, 1);
-    drawCenteredText_(cx, 212, "Press to finish", colors::text_hint, 1);
+    if (settings_editor_type_ == SettingsEditorValueType::F32) {
+        char step_buf[24] = {0};
+        // Show as 0.01 / 0.1 / 1 / 10, without trailing clutter.
+        const float s = settings_editor_f32_step_;
+        if (s >= 1.0f) {
+            snprintf(step_buf, sizeof(step_buf), "Step: %.0f", static_cast<double>(s));
+        } else if (s >= 0.1f) {
+            snprintf(step_buf, sizeof(step_buf), "Step: %.1f", static_cast<double>(s));
+        } else {
+            snprintf(step_buf, sizeof(step_buf), "Step: %.2f", static_cast<double>(s));
+        }
+
+        drawCenteredText_(cx, 190, "Rotate to change", colors::text_hint, 1);
+        drawCenteredText_(cx, 204, step_buf, colors::text_hint, 1);
+        drawCenteredText_(cx, 218, "Long press to change step", colors::text_hint, 1);
+    } else {
+        drawCenteredText_(cx, 210, "Rotate to change", colors::text_hint, 1);
+    }
 }
 
 void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
@@ -1899,7 +2353,9 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
     drawRoundedRect_(x, y, w, h, 12, colors::bg_elevated, true);
     drawRoundedRect_(x, y, w, h, 12, colors::accent_blue, false);
 
-    const char* title = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) ? "Keep change?" : "Settings";
+    const char* title = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm)
+        ? "Keep change?"
+        : ((settings_popup_mode_ == SettingsPopupMode::SaveConfirm) ? "Send changes?" : "Settings");
     canvas_->setTextSize(2);
     canvas_->setTextColor(colors::text_primary);
     const int16_t tw = static_cast<int16_t>(canvas_->textWidth(title));
@@ -1915,15 +2371,16 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
         bool bool_is_mode = false;
         switch (settings_editor_category_) {
             case SettingsCategory::FatigueTest:
-                if (settings_editor_index_ == 2) { unit = "s"; }
-                else if (settings_editor_index_ == 3) { unit = "s"; }
+                if (settings_editor_index_ == 2) { unit = "rpm"; }
+                else if (settings_editor_index_ == 3) { unit = kUnitRevPerS2Ui; }
+                else if (settings_editor_index_ == 4) { unit = "s"; }
                 break;
             case SettingsCategory::BoundsFinding:
                 if (settings_editor_index_ == 1) { bool_is_mode = true; }
                 else if (settings_editor_index_ == 2) { unit = "rpm"; }
                 else if (settings_editor_index_ == 3) { unit = "rpm"; }
-                else if (settings_editor_index_ == 4) { unit = "x"; }
-                else if (settings_editor_index_ == 5) { unit = "rev/s^2"; }
+                else if (settings_editor_index_ == 5) { unit = "x"; }
+                else if (settings_editor_index_ == 6) { unit = kUnitRevPerS2Ui; }
                 break;
             case SettingsCategory::UI:
                 if (settings_editor_index_ == 1) { unit = "%"; }
@@ -1935,7 +2392,12 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
         const bool has_unit = (unit[0] != '\0');
         switch (settings_editor_type_) {
             case SettingsEditorValueType::U32:
-                if (has_unit) {
+                if (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 4) {
+                    const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.5;
+                    const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.5;
+                    snprintf(old_line, sizeof(old_line), "Old: %.1f %s", old_s, unit);
+                    snprintf(new_line, sizeof(new_line), "New: %.1f %s", new_s, unit);
+                } else if (has_unit) {
                     snprintf(old_line, sizeof(old_line), "Old: %" PRIu32 " %s", settings_editor_u32_old_, unit);
                     snprintf(new_line, sizeof(new_line), "New: %" PRIu32 " %s", settings_editor_u32_new_, unit);
                 } else {
@@ -1945,11 +2407,11 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
                 break;
             case SettingsEditorValueType::F32:
                 if (has_unit) {
-                    snprintf(old_line, sizeof(old_line), "Old: %.2f %s", static_cast<double>(settings_editor_f32_old_), unit);
-                    snprintf(new_line, sizeof(new_line), "New: %.2f %s", static_cast<double>(settings_editor_f32_new_), unit);
+                    snprintf(old_line, sizeof(old_line), "Old: %.1f %s", static_cast<double>(settings_editor_f32_old_), unit);
+                    snprintf(new_line, sizeof(new_line), "New: %.1f %s", static_cast<double>(settings_editor_f32_new_), unit);
                 } else {
-                    snprintf(old_line, sizeof(old_line), "Old: %.2f", static_cast<double>(settings_editor_f32_old_));
-                    snprintf(new_line, sizeof(new_line), "New: %.2f", static_cast<double>(settings_editor_f32_new_));
+                    snprintf(old_line, sizeof(old_line), "Old: %.1f", static_cast<double>(settings_editor_f32_old_));
+                    snprintf(new_line, sizeof(new_line), "New: %.1f", static_cast<double>(settings_editor_f32_new_));
                 }
                 break;
             case SettingsEditorValueType::Bool:
@@ -1989,6 +2451,21 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
         const Rect disc_btn{static_cast<int16_t>(cx + 10), btn_y, btn_w, btn_h};
         drawButton_(keep_btn, "Keep", settings_popup_selection_ == 0, false);
         drawButton_(disc_btn, "Discard", settings_popup_selection_ == 1, false);
+    } else if (settings_popup_mode_ == SettingsPopupMode::SaveConfirm) {
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->setCursor(x + 16, y + 52);
+        canvas_->print("Send edited settings to tester");
+        canvas_->setCursor(x + 16, y + 70);
+        canvas_->print("or re-sync from machine config");
+
+        const int16_t btn_w = 84;
+        const int16_t btn_h = 32;
+        const int16_t btn_y = y + h - 44;
+        const Rect send_btn{static_cast<int16_t>(cx - btn_w - 10), btn_y, btn_w, btn_h};
+        const Rect sync_btn{static_cast<int16_t>(cx + 10), btn_y, btn_w, btn_h};
+        drawButton_(send_btn, "Send", settings_popup_selection_ == 0, false);
+        drawButton_(sync_btn, "Resync", settings_popup_selection_ == 1, false);
     }
 }
 
@@ -2116,8 +2593,9 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
     }
 
     // === BOTTOM CONTROLS (Back + Start/Stop) ===
-    const Rect back_btn{ 18, 190, 64, 32 };
-    const Rect action_btn{ 90, 190, 132, 32 };
+    // Slightly higher to avoid bottom-edge clipping on the round display.
+    const Rect back_btn{ 18, 186, 64, 30 };
+    const Rect action_btn{ 90, 186, 132, 30 };
 
     const char* action_label = "Start";
     if (bounds_state_ == BoundsState::Running) action_label = "Stop";
@@ -2148,7 +2626,7 @@ void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
     const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
 
     // Check pending command timeout
-    if (pending_command_id_ != 0 && (now_ms - pending_command_tick_ > 3000)) {
+    if (pending_command_id_ != 0 && (now_ms - pending_command_tick_ > 2500)) {
         pending_command_id_ = 0;
     }
 
@@ -2226,11 +2704,19 @@ void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
     canvas_->print(state_text);
 
     // === CORNER ELEMENTS ===
-    // Back button (top-left)
-    canvas_->fillSmoothRoundRect(8, 8, 50, 26, 8, colors::bg_elevated);
+    // Back button (top-center; circular-safe)
+    const int16_t back_x = 76;
+    const int16_t back_y = 10;
+    const int16_t back_w = 88;
+    const int16_t back_h = 30;
+    const bool back_focused = (live_focus_ == LiveFocus::Back);
+    canvas_->fillSmoothRoundRect(back_x, back_y, back_w, back_h, 10, back_focused ? colors::accent_blue : colors::bg_elevated);
+    if (back_focused) {
+        canvas_->drawRoundRect(back_x, back_y, back_w, back_h, 10, colors::text_primary);
+    }
     canvas_->setTextSize(1);
-    canvas_->setTextColor(colors::text_secondary);
-    canvas_->setCursor(18, 15);
+    canvas_->setTextColor(back_focused ? colors::bg_primary : colors::text_secondary);
+    canvas_->setCursor(back_x + 18, back_y + 9);
     canvas_->print("< Back");
 
     // Connection indicator (top-right)
@@ -2240,7 +2726,9 @@ void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
     const int16_t hint_y = 240 - 28;
     canvas_->setTextSize(1);
     canvas_->setTextColor(colors::text_hint);
-    drawCenteredText_(cx, hint_y, "Press dial for actions", colors::text_hint, 1);
+    drawCenteredText_(cx, hint_y,
+        (live_focus_ == LiveFocus::Back) ? "Press dial: back" : "Press dial: actions",
+        colors::text_hint, 1);
     
     // Touch target indicator (subtle arc at bottom)
     canvas_->drawArc(cx, cy, 98, 96, 160, 200, colors::bg_elevated);
@@ -2389,11 +2877,18 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
                 live_popup_mode_ = LivePopupMode::None;
             } else {
                 // Start
-                (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_, 
-                    static_cast<uint8_t>(fatigue_proto::CommandId::Start), nullptr, 0);
-                pending_command_id_ = 1;
-                pending_command_tick_ = now_ms;
-                logf_(now_ms, "TX: Start cmd");
+                const bool ok = espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::Start),
+                    nullptr,
+                    0);
+                if (ok) {
+                    pending_command_id_ = 1;
+                    pending_command_tick_ = now_ms;
+                    logf_(now_ms, "TX: Start cmd");
+                } else {
+                    logf_(now_ms, "TX: Start cmd FAILED");
+                }
                 live_popup_mode_ = LivePopupMode::None;
             }
         } else if (live_popup_mode_ == LivePopupMode::RunningActions) {
@@ -2402,19 +2897,33 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
                 live_popup_mode_ = LivePopupMode::None;
             } else if (live_popup_selection_ == 1) {
                 // Pause
-                (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
-                    static_cast<uint8_t>(fatigue_proto::CommandId::Pause), nullptr, 0);
-                pending_command_id_ = 2;
-                pending_command_tick_ = now_ms;
-                logf_(now_ms, "TX: Pause cmd");
+                const bool ok = espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::Pause),
+                    nullptr,
+                    0);
+                if (ok) {
+                    pending_command_id_ = 2;
+                    pending_command_tick_ = now_ms;
+                    logf_(now_ms, "TX: Pause cmd");
+                } else {
+                    logf_(now_ms, "TX: Pause cmd FAILED");
+                }
                 live_popup_mode_ = LivePopupMode::None;
             } else {
                 // Stop
-                (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
-                    static_cast<uint8_t>(fatigue_proto::CommandId::Stop), nullptr, 0);
-                pending_command_id_ = 4;
-                pending_command_tick_ = now_ms;
-                logf_(now_ms, "TX: Stop cmd");
+                const bool ok = espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::Stop),
+                    nullptr,
+                    0);
+                if (ok) {
+                    pending_command_id_ = 4;
+                    pending_command_tick_ = now_ms;
+                    logf_(now_ms, "TX: Stop cmd");
+                } else {
+                    logf_(now_ms, "TX: Stop cmd FAILED");
+                }
                 live_popup_mode_ = LivePopupMode::None;
             }
         } else if (live_popup_mode_ == LivePopupMode::PausedActions) {
@@ -2423,19 +2932,33 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
                 live_popup_mode_ = LivePopupMode::None;
             } else if (live_popup_selection_ == 1) {
                 // Resume
-                (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
-                    static_cast<uint8_t>(fatigue_proto::CommandId::Resume), nullptr, 0);
-                pending_command_id_ = 3;
-                pending_command_tick_ = now_ms;
-                logf_(now_ms, "TX: Resume cmd");
+                const bool ok = espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::Resume),
+                    nullptr,
+                    0);
+                if (ok) {
+                    pending_command_id_ = 3;
+                    pending_command_tick_ = now_ms;
+                    logf_(now_ms, "TX: Resume cmd");
+                } else {
+                    logf_(now_ms, "TX: Resume cmd FAILED");
+                }
                 live_popup_mode_ = LivePopupMode::None;
             } else {
                 // Stop
-                (void)espnow::SendCommand(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
-                    static_cast<uint8_t>(fatigue_proto::CommandId::Stop), nullptr, 0);
-                pending_command_id_ = 4;
-                pending_command_tick_ = now_ms;
-                logf_(now_ms, "TX: Stop cmd");
+                const bool ok = espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::Stop),
+                    nullptr,
+                    0);
+                if (ok) {
+                    pending_command_id_ = 4;
+                    pending_command_tick_ = now_ms;
+                    logf_(now_ms, "TX: Stop cmd");
+                } else {
+                    logf_(now_ms, "TX: Stop cmd FAILED");
+                }
                 live_popup_mode_ = LivePopupMode::None;
             }
         }
