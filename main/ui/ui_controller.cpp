@@ -57,33 +57,23 @@ void ui::UiController::Init() noexcept
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     boot_start_ms_ = now_ms;
     
-    // Draw boot screen to canvas and push
-    if (canvas_ != nullptr) {
-        canvas_->fillScreen(TFT_BLACK);
-        
-        // ConMed™ logo - large centered text
-        canvas_->setTextSize(3);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->drawCenterString("ConMed", CENTER_X_, CENTER_Y_ - 30);
-        
-        // TM superscript
-        canvas_->setTextSize(1);
-        canvas_->drawString("TM", CENTER_X_ + 58, CENTER_Y_ - 45);
-        
-        // Subtitle
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(0xAD55);  // Light gray
-        canvas_->drawCenterString("Fatigue Test Unit", CENTER_X_, CENTER_Y_ + 20);
-        
-        canvas_->pushSprite(0, 0);
+    // Premium boot splash + fade-in animation (drawn on sprite)
+    constexpr int kFadeSteps = 40;
+    for (int i = 0; i <= kFadeSteps; ++i) {
+        const uint32_t t_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        const float p = static_cast<float>(i) / static_cast<float>(kFadeSteps);
+
+        drawBootScreen_(t_ms, p);
+        if (canvas_ != nullptr) {
+            canvas_->pushSprite(0, 0);
+        }
+
+        // Keep the original "fade to half brightness" behavior (0..128)
+        const uint8_t b = static_cast<uint8_t>(std::min(128.0f, 128.0f * p));
+        M5.Display.setBrightness(b);
+        vTaskDelay(pdMS_TO_TICKS(12));
     }
-    
-    // Fade in brightness
-    for (int i = 0; i < 128; i++) {
-        M5.Display.setBrightness(i);
-        vTaskDelay(pdMS_TO_TICKS(4));
-    }
-    vTaskDelay(pdMS_TO_TICKS(800));  // Hold boot screen
+    vTaskDelay(pdMS_TO_TICKS(650));  // Hold boot splash briefly
 
     // Apply saved brightness setting
     if (settings_ != nullptr) {
@@ -106,6 +96,97 @@ void ui::UiController::Init() noexcept
 
     dirty_ = true;
     ESP_LOGI(TAG_, "UI initialized");
+}
+
+void ui::UiController::drawBootScreen_(uint32_t now_ms, float progress) noexcept
+{
+    if (canvas_ == nullptr) {
+        return;
+    }
+
+    progress = std::max(0.0f, std::min(1.0f, progress));
+    const float ease = easeOutCubic_(progress);
+
+    // --- Background: subtle vertical gradient (deep navy -> black) ---
+    for (int16_t y = 0; y < SCREEN_SIZE_; ++y) {
+        const float t = static_cast<float>(y) / static_cast<float>(SCREEN_SIZE_ - 1);
+        const uint8_t r = static_cast<uint8_t>(4 + 10 * (1.0f - t));
+        const uint8_t g = static_cast<uint8_t>(6 + 14 * (1.0f - t));
+        const uint8_t b = static_cast<uint8_t>(12 + 26 * (1.0f - t));
+        const uint16_t c = colors::rgb565(r, g, b);
+        canvas_->fillRect(0, y, SCREEN_SIZE_, 1, c);
+    }
+
+    // Circular vignette ring to emphasize the dial display
+    canvas_->drawCircle(CENTER_X_, CENTER_Y_, 118, colors::bg_secondary);
+    canvas_->drawCircle(CENTER_X_, CENTER_Y_, 119, colors::text_hint);
+
+    // --- Glow behind the logo ---
+    const int16_t glow_x = CENTER_X_;
+    const int16_t glow_y = CENTER_Y_ - 18;
+    const float pulse = 0.5f + 0.5f * std::sinf(static_cast<float>(now_ms) * 0.006f);
+    const uint8_t glow_boost = static_cast<uint8_t>(18 + 28 * pulse);
+    for (int i = 0; i < 6; ++i) {
+        const int16_t r = static_cast<int16_t>(92 - i * 14);
+        const uint8_t rr = static_cast<uint8_t>(0 + i * 2);
+        const uint8_t gg = static_cast<uint8_t>(22 + glow_boost + i * 6);
+        const uint8_t bb = static_cast<uint8_t>(48 + glow_boost + i * 10);
+        canvas_->fillSmoothCircle(glow_x, glow_y, r, colors::rgb565(rr, gg, bb));
+    }
+
+    // --- Progress ring (boot "loading" feel) ---
+    const float ring_p = 0.08f + 0.92f * ease;
+    drawProgressArc_(CENTER_X_, CENTER_Y_, 112, 7, ring_p, colors::accent_cyan, colors::progress_bg);
+
+    // Accent orbit dot along the ring
+    const float ang = (-90.0f + 360.0f * ring_p) * (3.1415926f / 180.0f);
+    const int16_t dot_x = static_cast<int16_t>(CENTER_X_ + std::cos(ang) * 112.0f);
+    const int16_t dot_y = static_cast<int16_t>(CENTER_Y_ + std::sin(ang) * 112.0f);
+    canvas_->fillSmoothCircle(dot_x, dot_y, 4, colors::accent_blue);
+    canvas_->drawCircle(dot_x, dot_y, 5, colors::text_hint);
+
+    // --- Logo block (shadowed) ---
+    const int16_t logo_y = CENTER_Y_ - 36;
+    canvas_->setTextSize(3);
+    canvas_->setTextColor(colors::bg_secondary);
+    canvas_->drawCenterString("ConMed", CENTER_X_ + 2, logo_y + 2);
+    canvas_->setTextColor(TFT_WHITE);
+    canvas_->drawCenterString("ConMed", CENTER_X_, logo_y);
+
+    // TM badge (small pill/bubble)
+    const int16_t tm_x = CENTER_X_ + 70;
+    const int16_t tm_y = logo_y - 10;
+    canvas_->fillSmoothRoundRect(tm_x - 12, tm_y - 7, 26, 16, 8, colors::bg_card);
+    canvas_->drawRoundRect(tm_x - 12, tm_y - 7, 26, 16, 8, colors::text_hint);
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_secondary);
+    canvas_->setCursor(tm_x - 6, tm_y - 3);
+    canvas_->print("TM");
+
+    // --- Subtitle pill ---
+    const char* subtitle = "Fatigue Test Unit";
+    canvas_->setTextSize(1);
+    const int16_t sub_w = static_cast<int16_t>(canvas_->textWidth(subtitle)) + 26;
+    const int16_t sub_h = 20;
+    const int16_t sub_x = CENTER_X_ - sub_w / 2;
+    const int16_t sub_y = CENTER_Y_ + 18;
+    canvas_->fillSmoothRoundRect(sub_x, sub_y, sub_w, sub_h, sub_h / 2, colors::bg_card);
+    canvas_->drawRoundRect(sub_x, sub_y, sub_w, sub_h, sub_h / 2, colors::button_border);
+    canvas_->setTextColor(colors::text_secondary);
+    canvas_->setCursor(sub_x + 13, sub_y + 6);
+    canvas_->print(subtitle);
+
+    // --- Status line ---
+    canvas_->setTextColor(colors::text_muted);
+    canvas_->setCursor(18, 216);
+    canvas_->print("Starting...");
+
+    // Small progress hint (percent)
+    char pct[8];
+    const int percent = static_cast<int>(std::lround(progress * 100.0f));
+    std::snprintf(pct, sizeof(pct), "%d%%", std::max(0, std::min(100, percent)));
+    canvas_->setCursor(240 - 18 - static_cast<int16_t>(canvas_->textWidth(pct)), 216);
+    canvas_->print(pct);
 }
 
 void ui::UiController::initCircularMenu_() noexcept
