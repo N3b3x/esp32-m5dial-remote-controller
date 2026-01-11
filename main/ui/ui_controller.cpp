@@ -157,6 +157,8 @@ void ui::UiController::Tick() noexcept
         period_ms = 33;  // ~30fps during menu animation
     } else if (page_ == Page::Landing && conn_status_ == ConnStatus::Connecting) {
         period_ms = 500;  // Slow for "Waiting..." animation dots
+    } else if (page_ == Page::Terminal && terminal_overscroll_px_ != 0.0f) {
+        period_ms = 33;  // ~30fps while spring animation decays
     }
     
     if (dirty_ || (now_ms - last_render_ms_) > period_ms) {
@@ -357,61 +359,16 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
             enterSettings_();
         }
 
-        // If editing a numeric value, rotation changes it.
-        if (settings_value_editing_) {
-            switch (settings_category_) {
-                case SettingsCategory::Main:
-                    // Main menu has no editable values.
-                    break;
+        // Popup has priority.
+        if (settings_popup_mode_ != SettingsPopupMode::None) {
+            handleSettingsPopupInput_(delta, false, now_ms);
+            dirty_ = true;
+            return;
+        }
 
-                case SettingsCategory::FatigueTest:
-                    // 0=< Back, 1=Cycles, 2=Time/Cycle, 3=Dwell
-                    switch (settings_index_) {
-                        case 1:
-                            edit_settings_.test_unit.cycle_amount = clamp_add_u32(edit_settings_.test_unit.cycle_amount, delta, 10);
-                            break;
-                        case 2:
-                            edit_settings_.test_unit.time_per_cycle_sec = clamp_add_u32(edit_settings_.test_unit.time_per_cycle_sec, delta, 1);
-                            break;
-                        case 3:
-                            edit_settings_.test_unit.dwell_time_sec = clamp_add_u32(edit_settings_.test_unit.dwell_time_sec, delta, 1);
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-
-                case SettingsCategory::BoundsFinding:
-                    // 0=< Back, 1=Mode(toggle), 2..5=numeric
-                    switch (settings_index_) {
-                        case 2:
-                            edit_settings_.test_unit.bounds_search_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.bounds_search_velocity_rpm + 0.1f * delta);
-                            break;
-                        case 3:
-                            edit_settings_.test_unit.stallguard_min_velocity_rpm = std::max(0.0f, edit_settings_.test_unit.stallguard_min_velocity_rpm + 0.1f * delta);
-                            break;
-                        case 4:
-                            edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, edit_settings_.test_unit.stall_detection_current_factor + 0.05f * delta);
-                            break;
-                        case 5:
-                            edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, edit_settings_.test_unit.bounds_search_accel_rev_s2 + 0.1f * delta);
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-
-                case SettingsCategory::UI:
-                    // 0=< Back, 1=Brightness(numeric), 2=Flip(toggle)
-                    if (settings_index_ == 1) {
-                        const int new_brightness = static_cast<int>(edit_settings_.ui.brightness) + delta * 5;
-                        edit_settings_.ui.brightness = static_cast<uint8_t>(std::clamp(new_brightness, 10, 255));
-                        // Apply brightness immediately for preview
-                        M5.Display.setBrightness(edit_settings_.ui.brightness);
-                    }
-                    break;
-            }
-
+        // Dedicated value editor has priority.
+        if (settings_value_editor_active_) {
+            handleSettingsValueEdit_(delta);
             dirty_ = true;
             return;
         }
@@ -457,7 +414,16 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         const int max_scroll = std::max(0, static_cast<int>(log_count_) - max_lines);
 
         // scroll_lines_ is "lines away from newest".
-        scroll_lines_ = std::clamp(scroll_lines_ - (delta * 2), 0, max_scroll);
+        const int desired = scroll_lines_ - (delta * 2);
+        if (desired < 0) {
+            scroll_lines_ = 0;
+            terminal_overscroll_px_ = std::max(terminal_overscroll_px_, 8.0f);
+        } else if (desired > max_scroll) {
+            scroll_lines_ = max_scroll;
+            terminal_overscroll_px_ = std::min(terminal_overscroll_px_, -8.0f);
+        } else {
+            scroll_lines_ = desired;
+        }
         dirty_ = true;
         return;
     }
@@ -484,6 +450,7 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             }
             if (page_ == Page::Terminal) {
                 scroll_lines_ = 0;
+                terminal_overscroll_px_ = 0.0f;
             }
             dirty_ = true;
         }
@@ -504,17 +471,34 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             enterSettings_();
         }
 
+        // Popup click.
+        if (settings_popup_mode_ != SettingsPopupMode::None) {
+            handleSettingsPopupInput_(0, true, now_ms);
+            dirty_ = true;
+            return;
+        }
+
+        // Value editor click: exit editor and (if changed) confirm keep/discard.
+        if (settings_value_editor_active_) {
+            playBeep_(2);
+            if (settingsEditorHasChange_()) {
+                settings_popup_mode_ = SettingsPopupMode::ValueChangeConfirm;
+                settings_popup_selection_ = 0; // default KEEP
+            } else {
+                settings_value_editor_active_ = false;
+                settings_editor_type_ = SettingsEditorValueType::None;
+            }
+            dirty_ = true;
+            return;
+        }
+
         playBeep_(2);
 
-        // Click behavior is driven by the category-based list in drawSettings_().
         // Index 0 is always "< Back".
         if (settings_index_ == 0) {
-            settings_value_editing_ = false;
             if (settings_category_ == SettingsCategory::Main) {
-                // Exit settings (discard) via Back.
                 settingsBack_();
             } else {
-                // Go up one level.
                 settings_category_ = SettingsCategory::Main;
                 settings_index_ = 0;
             }
@@ -524,51 +508,19 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
 
         // Main: enter sub-category.
         if (settings_category_ == SettingsCategory::Main) {
-            settings_value_editing_ = false;
             switch (settings_index_) {
                 case 1: settings_category_ = SettingsCategory::FatigueTest; break;
                 case 2: settings_category_ = SettingsCategory::BoundsFinding; break;
                 case 3: settings_category_ = SettingsCategory::UI; break;
                 default: break;
             }
-            // Start on first real item (not Back).
             settings_index_ = 1;
             dirty_ = true;
             return;
         }
 
-        // Sub-categories: toggles vs edit mode.
-        switch (settings_category_) {
-            case SettingsCategory::FatigueTest:
-                // Numeric entries: toggle edit mode.
-                settings_value_editing_ = !settings_value_editing_;
-                break;
-
-            case SettingsCategory::BoundsFinding:
-                if (settings_index_ == 1) {
-                    // Mode toggle.
-                    edit_settings_.test_unit.bounds_method_stallguard = !edit_settings_.test_unit.bounds_method_stallguard;
-                    settings_value_editing_ = false;
-                } else {
-                    settings_value_editing_ = !settings_value_editing_;
-                }
-                break;
-
-            case SettingsCategory::UI:
-                if (settings_index_ == 2) {
-                    // Flip toggle.
-                    edit_settings_.ui.orientation_flipped = !edit_settings_.ui.orientation_flipped;
-                    settings_value_editing_ = false;
-                } else {
-                    // Brightness numeric.
-                    settings_value_editing_ = !settings_value_editing_;
-                }
-                break;
-
-            case SettingsCategory::Main:
-                break;
-        }
-
+        // Sub-categories: always enter dedicated value editor.
+        beginSettingsValueEditor_();
         dirty_ = true;
         return;
     }
@@ -699,7 +651,17 @@ void ui::UiController::onTouchDrag_(int16_t delta_y, uint32_t now_ms) noexcept
             constexpr int16_t line_h = 14;
             const int max_lines = (log_bottom - log_top) / line_h;
             const int max_scroll = std::max(0, static_cast<int>(log_count_) - max_lines);
-            scroll_lines_ = std::clamp(scroll_lines_ + lines, 0, max_scroll);
+
+            const int desired = scroll_lines_ + lines;
+            if (desired < 0) {
+                scroll_lines_ = 0;
+                terminal_overscroll_px_ = std::max(terminal_overscroll_px_, 8.0f);
+            } else if (desired > max_scroll) {
+                scroll_lines_ = max_scroll;
+                terminal_overscroll_px_ = std::min(terminal_overscroll_px_, -8.0f);
+            } else {
+                scroll_lines_ = desired;
+            }
             dirty_ = true;
         }
     }
@@ -753,6 +715,14 @@ void ui::UiController::enterSettings_() noexcept
     settings_focus_ = SettingsFocus::List;
     settings_value_editing_ = false;
 
+    settings_popup_mode_ = SettingsPopupMode::None;
+    settings_popup_selection_ = 0;
+
+    settings_value_editor_active_ = false;
+    settings_editor_category_ = SettingsCategory::Main;
+    settings_editor_index_ = 0;
+    settings_editor_type_ = SettingsEditorValueType::None;
+
     // Reset animation state so the list starts stable.
     settings_anim_offset_ = 0.0f;
     settings_target_offset_ = 0.0f;
@@ -765,6 +735,12 @@ void ui::UiController::settingsBack_() noexcept
     settings_value_editing_ = false;
     settings_category_ = SettingsCategory::Main;
     settings_index_ = 0;
+
+    settings_popup_mode_ = SettingsPopupMode::None;
+    settings_popup_selection_ = 0;
+
+    settings_value_editor_active_ = false;
+    settings_editor_type_ = SettingsEditorValueType::None;
     page_ = Page::Landing;
 }
 
@@ -787,6 +763,9 @@ void ui::UiController::settingsSave_(uint32_t now_ms) noexcept
 
     in_settings_edit_ = false;
     settings_value_editing_ = false;
+    settings_popup_mode_ = SettingsPopupMode::None;
+    settings_value_editor_active_ = false;
+    settings_editor_type_ = SettingsEditorValueType::None;
     page_ = Page::Landing;
 }
 
@@ -809,6 +788,245 @@ void ui::UiController::playBeep_(int type) noexcept
         default:
             break;
     }
+}
+
+bool ui::UiController::settingsEditorHasChange_() const noexcept
+{
+    switch (settings_editor_type_) {
+        case SettingsEditorValueType::U32: return settings_editor_u32_new_ != settings_editor_u32_old_;
+        case SettingsEditorValueType::F32: return settings_editor_f32_new_ != settings_editor_f32_old_;
+        case SettingsEditorValueType::Bool: return settings_editor_bool_new_ != settings_editor_bool_old_;
+        case SettingsEditorValueType::U8: return settings_editor_u8_new_ != settings_editor_u8_old_;
+        default: return false;
+    }
+}
+
+void ui::UiController::discardSettingsEditorValue_() noexcept
+{
+    switch (settings_editor_type_) {
+        case SettingsEditorValueType::U32: settings_editor_u32_new_ = settings_editor_u32_old_; break;
+        case SettingsEditorValueType::F32: settings_editor_f32_new_ = settings_editor_f32_old_; break;
+        case SettingsEditorValueType::Bool: settings_editor_bool_new_ = settings_editor_bool_old_; break;
+        case SettingsEditorValueType::U8: settings_editor_u8_new_ = settings_editor_u8_old_; break;
+        default: break;
+    }
+}
+
+void ui::UiController::applySettingsEditorValue_() noexcept
+{
+    // Apply the editor's "new" value back into edit_settings_ for the active target.
+    switch (settings_editor_category_) {
+        case SettingsCategory::FatigueTest:
+            if (settings_editor_type_ == SettingsEditorValueType::U32) {
+                if (settings_editor_index_ == 1) {
+                    edit_settings_.test_unit.cycle_amount = settings_editor_u32_new_;
+                } else if (settings_editor_index_ == 2) {
+                    edit_settings_.test_unit.time_per_cycle_sec = settings_editor_u32_new_;
+                } else if (settings_editor_index_ == 3) {
+                    edit_settings_.test_unit.dwell_time_sec = settings_editor_u32_new_;
+                }
+            }
+            break;
+
+        case SettingsCategory::BoundsFinding:
+            if (settings_editor_index_ == 1 && settings_editor_type_ == SettingsEditorValueType::Bool) {
+                edit_settings_.test_unit.bounds_method_stallguard = settings_editor_bool_new_;
+            } else if (settings_editor_type_ == SettingsEditorValueType::F32) {
+                if (settings_editor_index_ == 2) {
+                    edit_settings_.test_unit.bounds_search_velocity_rpm = std::max(0.0f, settings_editor_f32_new_);
+                } else if (settings_editor_index_ == 3) {
+                    edit_settings_.test_unit.stallguard_min_velocity_rpm = std::max(0.0f, settings_editor_f32_new_);
+                } else if (settings_editor_index_ == 4) {
+                    edit_settings_.test_unit.stall_detection_current_factor = std::max(0.0f, settings_editor_f32_new_);
+                } else if (settings_editor_index_ == 5) {
+                    edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, settings_editor_f32_new_);
+                }
+            }
+            break;
+
+        case SettingsCategory::UI:
+            if (settings_editor_index_ == 1 && settings_editor_type_ == SettingsEditorValueType::U8) {
+                edit_settings_.ui.brightness = settings_editor_u8_new_;
+                // Preview immediately
+                M5.Display.setBrightness(edit_settings_.ui.brightness);
+            } else if (settings_editor_index_ == 2 && settings_editor_type_ == SettingsEditorValueType::Bool) {
+                edit_settings_.ui.orientation_flipped = settings_editor_bool_new_;
+            }
+            break;
+
+        case SettingsCategory::Main:
+            break;
+    }
+}
+
+void ui::UiController::beginSettingsValueEditor_() noexcept
+{
+    settings_value_editor_active_ = true;
+    settings_popup_mode_ = SettingsPopupMode::None;
+    settings_popup_selection_ = 0;
+
+    settings_editor_category_ = settings_category_;
+    settings_editor_index_ = settings_index_;
+    settings_editor_type_ = SettingsEditorValueType::None;
+
+    // Snapshot the current value for the selected item.
+    switch (settings_category_) {
+        case SettingsCategory::FatigueTest:
+            settings_editor_type_ = SettingsEditorValueType::U32;
+            if (settings_index_ == 1) {
+                settings_editor_u32_old_ = edit_settings_.test_unit.cycle_amount;
+            } else if (settings_index_ == 2) {
+                settings_editor_u32_old_ = edit_settings_.test_unit.time_per_cycle_sec;
+            } else if (settings_index_ == 3) {
+                settings_editor_u32_old_ = edit_settings_.test_unit.dwell_time_sec;
+            } else {
+                settings_editor_u32_old_ = 0;
+            }
+            settings_editor_u32_new_ = settings_editor_u32_old_;
+            break;
+
+        case SettingsCategory::BoundsFinding:
+            if (settings_index_ == 1) {
+                settings_editor_type_ = SettingsEditorValueType::Bool;
+                settings_editor_bool_old_ = edit_settings_.test_unit.bounds_method_stallguard;
+                settings_editor_bool_new_ = settings_editor_bool_old_;
+            } else {
+                settings_editor_type_ = SettingsEditorValueType::F32;
+                if (settings_index_ == 2) {
+                    settings_editor_f32_old_ = edit_settings_.test_unit.bounds_search_velocity_rpm;
+                } else if (settings_index_ == 3) {
+                    settings_editor_f32_old_ = edit_settings_.test_unit.stallguard_min_velocity_rpm;
+                } else if (settings_index_ == 4) {
+                    settings_editor_f32_old_ = edit_settings_.test_unit.stall_detection_current_factor;
+                } else if (settings_index_ == 5) {
+                    settings_editor_f32_old_ = edit_settings_.test_unit.bounds_search_accel_rev_s2;
+                } else {
+                    settings_editor_f32_old_ = 0.0f;
+                }
+                settings_editor_f32_new_ = settings_editor_f32_old_;
+            }
+            break;
+
+        case SettingsCategory::UI:
+            if (settings_index_ == 1) {
+                settings_editor_type_ = SettingsEditorValueType::U8;
+                settings_editor_u8_old_ = edit_settings_.ui.brightness;
+                settings_editor_u8_new_ = settings_editor_u8_old_;
+            } else if (settings_index_ == 2) {
+                settings_editor_type_ = SettingsEditorValueType::Bool;
+                settings_editor_bool_old_ = edit_settings_.ui.orientation_flipped;
+                settings_editor_bool_new_ = settings_editor_bool_old_;
+            }
+            break;
+
+        case SettingsCategory::Main:
+            // Should not happen (main items aren't editable), but keep it safe.
+            settings_editor_type_ = SettingsEditorValueType::None;
+            break;
+    }
+}
+
+void ui::UiController::handleSettingsValueEdit_(int delta) noexcept
+{
+    if (!settings_value_editor_active_ || delta == 0) {
+        return;
+    }
+
+    playBeep_(delta > 0 ? 1 : 0);
+
+    auto clamp_add_u32 = [](uint32_t value, int delta_steps, uint32_t step) -> uint32_t {
+        const int64_t next = static_cast<int64_t>(value) + static_cast<int64_t>(delta_steps) * static_cast<int64_t>(step);
+        if (next < 0) return 0;
+        if (next > static_cast<int64_t>(UINT32_MAX)) return UINT32_MAX;
+        return static_cast<uint32_t>(next);
+    };
+
+    switch (settings_editor_type_) {
+        case SettingsEditorValueType::U32: {
+            const uint32_t step = (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 1) ? 10 : 1;
+            settings_editor_u32_new_ = clamp_add_u32(settings_editor_u32_new_, delta, step);
+            break;
+        }
+        case SettingsEditorValueType::F32: {
+            float step = 0.1f;
+            if (settings_editor_category_ == SettingsCategory::BoundsFinding && settings_editor_index_ == 4) {
+                step = 0.05f;
+            }
+            settings_editor_f32_new_ = std::max(0.0f, settings_editor_f32_new_ + step * static_cast<float>(delta));
+            break;
+        }
+        case SettingsEditorValueType::Bool:
+            settings_editor_bool_new_ = !settings_editor_bool_new_;
+            break;
+        case SettingsEditorValueType::U8: {
+            const int next = static_cast<int>(settings_editor_u8_new_) + delta * 5;
+            settings_editor_u8_new_ = static_cast<uint8_t>(std::clamp(next, 10, 255));
+            // Preview brightness immediately.
+            if (settings_editor_category_ == SettingsCategory::UI && settings_editor_index_ == 1) {
+                M5.Display.setBrightness(settings_editor_u8_new_);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void ui::UiController::handleSettingsPopupInput_(int delta, bool click, uint32_t now_ms) noexcept
+{
+    if (settings_popup_mode_ == SettingsPopupMode::None) {
+        return;
+    }
+
+    const int max_sel = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) ? 1 : 2;
+
+    if (delta != 0) {
+        const int next = static_cast<int>(settings_popup_selection_) + (delta > 0 ? 1 : -1);
+        settings_popup_selection_ = static_cast<uint8_t>(std::clamp(next, 0, max_sel));
+        playBeep_(delta > 0 ? 1 : 0);
+        dirty_ = true;
+    }
+
+    if (!click) {
+        return;
+    }
+
+    playBeep_(2);
+
+    if (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) {
+        // 0=KEEP, 1=DISCARD
+        if (settings_popup_selection_ == 0) {
+            applySettingsEditorValue_();
+        } else {
+            discardSettingsEditorValue_();
+            // Restore previewed brightness if needed.
+            if (settings_editor_category_ == SettingsCategory::UI && settings_editor_index_ == 1 && settings_editor_type_ == SettingsEditorValueType::U8) {
+                M5.Display.setBrightness(settings_editor_u8_old_);
+            }
+        }
+
+        settings_popup_mode_ = SettingsPopupMode::None;
+        settings_popup_selection_ = 0;
+        settings_value_editor_active_ = false;
+        settings_editor_type_ = SettingsEditorValueType::None;
+        dirty_ = true;
+        return;
+    }
+
+    // SaveConfirm (legacy): 0=SAVE, 1=DISCARD, 2=CANCEL
+    if (settings_popup_selection_ == 0) {
+        settingsSave_(now_ms);
+        return;
+    }
+    if (settings_popup_selection_ == 1) {
+        settingsBack_();
+        return;
+    }
+
+    // Cancel
+    settings_popup_mode_ = SettingsPopupMode::None;
+    settings_popup_selection_ = 0;
+    dirty_ = true;
 }
 
 void ui::UiController::drawHeader_(const char* title) noexcept
@@ -1009,16 +1227,16 @@ void ui::UiController::drawCircularMenuIcons_(uint32_t now_ms) noexcept
         const auto& item = kMenuItems_[i];
         const bool is_selected = (i == selected);
         
-        // Calculate icon background radius (larger for selected)
-        int16_t bg_radius = menu_config_.icon_bg_radius;
+        // Draw hollow ring highlight FIRST (behind icon) for selected item only
         if (is_selected && !animating) {
-            bg_radius += menu_config_.icon_selected_offset;
+            // Draw ring outside the icon area (icon radius is 21, draw at 23-26)
+            const int16_t base_r = menu_config_.icon_bg_radius;  // 22
+            canvas_->drawCircle(ix, iy, base_r + 2, item.color);
+            canvas_->drawCircle(ix, iy, base_r + 3, item.color);
+            canvas_->drawCircle(ix, iy, base_r + 4, item.color);
         }
         
-        // Draw colored circular background
-        canvas_->fillSmoothCircle(ix, iy, bg_radius, item.color);
-        
-        // Draw icon centered on the background
+        // Draw icon centered ON TOP (icon already has colored background baked in)
         if (item.icon_data != nullptr) {
             const int16_t icon_x = ix - item.icon_w / 2;
             const int16_t icon_y = iy - item.icon_h / 2;
@@ -1174,8 +1392,23 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
         enterSettings_();
     }
 
+    // Dedicated value editor screen (optionally with confirm popup overlay).
+    if (settings_value_editor_active_) {
+        drawSettingsValueEditor_(now_ms);
+        if (settings_popup_mode_ != SettingsPopupMode::None) {
+            drawSettingsPopup_(now_ms);
+        }
+        return;
+    }
+
+    // Popup overlay (currently used for value-change confirmation).
+    if (settings_popup_mode_ != SettingsPopupMode::None) {
+        drawSettingsPopup_(now_ms);
+        return;
+    }
+
     // === SMOOTH ANIMATION ===
-    const float anim_speed = 0.4f;
+    const float anim_speed = 0.70f;
     settings_anim_offset_ += (settings_target_offset_ - settings_anim_offset_) * anim_speed;
     settings_target_offset_ = static_cast<float>(settings_index_) * kSettingsItemHeight_;
     
@@ -1219,8 +1452,8 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             for (int i = 0; i < item_count; ++i) labels[i] = fatigue_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%" PRIu32, edit_settings_.test_unit.cycle_amount);
-            snprintf(values[2], sizeof(values[2]), "%" PRIu32 "s", edit_settings_.test_unit.time_per_cycle_sec);
-            snprintf(values[3], sizeof(values[3]), "%" PRIu32 "s", edit_settings_.test_unit.dwell_time_sec);
+            snprintf(values[2], sizeof(values[2]), "%" PRIu32 " s", edit_settings_.test_unit.time_per_cycle_sec);
+            snprintf(values[3], sizeof(values[3]), "%" PRIu32 " s", edit_settings_.test_unit.dwell_time_sec);
             break;
             
         case SettingsCategory::BoundsFinding:
@@ -1232,7 +1465,7 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             snprintf(values[2], sizeof(values[2]), "%.1f rpm", static_cast<double>(edit_settings_.test_unit.bounds_search_velocity_rpm));
             snprintf(values[3], sizeof(values[3]), "%.1f rpm", static_cast<double>(edit_settings_.test_unit.stallguard_min_velocity_rpm));
             snprintf(values[4], sizeof(values[4]), "%.2fx", static_cast<double>(edit_settings_.test_unit.stall_detection_current_factor));
-            snprintf(values[5], sizeof(values[5]), "%.1f rev/s²", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2));
+            snprintf(values[5], sizeof(values[5]), "%.1f rev/s^2", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2));
             break;
             
         case SettingsCategory::UI:
@@ -1254,7 +1487,7 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
         
         const bool selected = (settings_index_ == i);
         const bool is_category = (settings_category_ == SettingsCategory::Main && i > 0);
-        const bool editing = selected && settings_value_editing_;
+        const bool editing = false; // No inline editing; value changes happen in a dedicated editor screen.
         
         // Draw item card - inline to use canvas_
         const int16_t card_x = 25;
@@ -1324,6 +1557,282 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
         canvas_->setTextColor(colors::text_hint);
         canvas_->setCursor(10, 35);
         canvas_->print("Settings >");
+    }
+}
+
+void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
+{
+    (void)now_ms;
+
+    const int16_t cx = 120;
+    const int16_t cy = 120;
+
+    // Background
+    canvas_->fillScreen(colors::bg_primary);
+    canvas_->drawCircle(cx, cy, 118, colors::bg_card);
+
+    // Resolve label + formatting for the current editor target
+    const char* label = "";
+    const char* unit = "";
+    bool bool_is_mode = false;
+
+    switch (settings_editor_category_) {
+        case SettingsCategory::FatigueTest:
+            if (settings_editor_index_ == 1) { label = "Cycles"; }
+            else if (settings_editor_index_ == 2) { label = "Time/Cycle"; unit = "s"; }
+            else if (settings_editor_index_ == 3) { label = "Dwell Time"; unit = "s"; }
+            break;
+        case SettingsCategory::BoundsFinding:
+            if (settings_editor_index_ == 1) { label = "Mode"; bool_is_mode = true; }
+            else if (settings_editor_index_ == 2) { label = "Search Speed"; unit = "rpm"; }
+            else if (settings_editor_index_ == 3) { label = "SG Min Vel"; unit = "rpm"; }
+            else if (settings_editor_index_ == 4) { label = "Stall Factor"; unit = "x"; }
+            else if (settings_editor_index_ == 5) { label = "Search Accel"; unit = "rev/s^2"; }
+            break;
+        case SettingsCategory::UI:
+            if (settings_editor_index_ == 1) { label = "Brightness"; unit = "%"; }
+            else if (settings_editor_index_ == 2) { label = "Flip Display"; }
+            break;
+        case SettingsCategory::Main:
+            break;
+    }
+
+    // Header bar
+    canvas_->fillRect(0, 0, 240, 44, colors::bg_elevated);
+    canvas_->setTextColor(colors::accent_orange);
+
+    // Fit the title to the circular top area (shrink, then split if needed)
+    const float r = 118.0f;
+    auto maxWidthAtY = [&](int16_t y_mid, int16_t margin) -> int16_t {
+        const float dy = static_cast<float>(y_mid) - static_cast<float>(cy);
+        const float half = std::sqrt(std::max(0.0f, r * r - dy * dy));
+        return static_cast<int16_t>(std::max(0.0f, (half * 2.0f) - static_cast<float>(margin)));
+    };
+
+    const int16_t max_w_size2 = maxWidthAtY(22, 18);
+    canvas_->setTextSize(2);
+    int16_t lw = static_cast<int16_t>(canvas_->textWidth(label));
+
+    if (lw <= max_w_size2) {
+        canvas_->setCursor(cx - lw / 2, 14);
+        canvas_->print(label);
+    } else {
+        // Try smaller text
+        const int16_t max_w_size1 = maxWidthAtY(24, 18);
+        canvas_->setTextSize(1);
+        lw = static_cast<int16_t>(canvas_->textWidth(label));
+
+        if (lw <= max_w_size1) {
+            canvas_->setCursor(cx - lw / 2, 18);
+            canvas_->print(label);
+        } else {
+            // Split on '/' first, then on space (best effort)
+            char line1[20] = {0};
+            char line2[20] = {0};
+            const char* split = strchr(label, '/');
+            if (split == nullptr) {
+                split = strrchr(label, ' ');
+            }
+
+            if (split != nullptr) {
+                const size_t n1 = std::min(sizeof(line1) - 1, static_cast<size_t>(split - label));
+                memcpy(line1, label, n1);
+                line1[n1] = '\0';
+
+                const char* rest = (*split == '/') ? (split + 1) : (split + 1);
+                while (*rest == ' ') { ++rest; }
+                snprintf(line2, sizeof(line2), "%s", rest);
+            } else {
+                snprintf(line1, sizeof(line1), "%s", label);
+            }
+
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::accent_orange);
+
+            if (line2[0] == '\0') {
+                const int16_t w1 = static_cast<int16_t>(canvas_->textWidth(line1));
+                canvas_->setCursor(cx - w1 / 2, 18);
+                canvas_->print(line1);
+            } else {
+                const int16_t w1 = static_cast<int16_t>(canvas_->textWidth(line1));
+                const int16_t w2 = static_cast<int16_t>(canvas_->textWidth(line2));
+                canvas_->setCursor(cx - w1 / 2, 12);
+                canvas_->print(line1);
+                canvas_->setCursor(cx - w2 / 2, 26);
+                canvas_->print(line2);
+            }
+        }
+    }
+
+    // Old value line
+    char old_buf[40] = {0};
+    char new_buf[40] = {0};
+    const bool has_unit = (unit[0] != '\0');
+    switch (settings_editor_type_) {
+        case SettingsEditorValueType::U32:
+            if (has_unit) {
+                snprintf(old_buf, sizeof(old_buf), "Old: %" PRIu32 " %s", settings_editor_u32_old_, unit);
+                snprintf(new_buf, sizeof(new_buf), "%" PRIu32 " %s", settings_editor_u32_new_, unit);
+            } else {
+                snprintf(old_buf, sizeof(old_buf), "Old: %" PRIu32, settings_editor_u32_old_);
+                snprintf(new_buf, sizeof(new_buf), "%" PRIu32, settings_editor_u32_new_);
+            }
+            break;
+        case SettingsEditorValueType::F32:
+            if (has_unit) {
+                snprintf(old_buf, sizeof(old_buf), "Old: %.2f %s", static_cast<double>(settings_editor_f32_old_), unit);
+                snprintf(new_buf, sizeof(new_buf), "%.2f %s", static_cast<double>(settings_editor_f32_new_), unit);
+            } else {
+                snprintf(old_buf, sizeof(old_buf), "Old: %.2f", static_cast<double>(settings_editor_f32_old_));
+                snprintf(new_buf, sizeof(new_buf), "%.2f", static_cast<double>(settings_editor_f32_new_));
+            }
+            break;
+        case SettingsEditorValueType::Bool:
+            if (bool_is_mode) {
+                snprintf(old_buf, sizeof(old_buf), "Old: %s", settings_editor_bool_old_ ? "StallGuard" : "Encoder");
+                snprintf(new_buf, sizeof(new_buf), "%s", settings_editor_bool_new_ ? "StallGuard" : "Encoder");
+            } else {
+                snprintf(old_buf, sizeof(old_buf), "Old: %s", settings_editor_bool_old_ ? "Yes" : "No");
+                snprintf(new_buf, sizeof(new_buf), "%s", settings_editor_bool_new_ ? "Yes" : "No");
+            }
+            break;
+        case SettingsEditorValueType::U8: {
+            const int old_pct = static_cast<int>(settings_editor_u8_old_) * 100 / 255;
+            const int new_pct = static_cast<int>(settings_editor_u8_new_) * 100 / 255;
+            snprintf(old_buf, sizeof(old_buf), "Old: %d%%", old_pct);
+            snprintf(new_buf, sizeof(new_buf), "%d%%", new_pct);
+            break;
+        }
+        default:
+            snprintf(old_buf, sizeof(old_buf), "Old: -");
+            snprintf(new_buf, sizeof(new_buf), "-");
+            break;
+    }
+
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_hint);
+    const int16_t ow = static_cast<int16_t>(canvas_->textWidth(old_buf));
+    canvas_->setCursor(cx - ow / 2, 54);
+    canvas_->print(old_buf);
+
+    // Big value
+    canvas_->setTextSize(4);
+    canvas_->setTextColor(colors::text_primary);
+    const int16_t vw = static_cast<int16_t>(canvas_->textWidth(new_buf));
+    canvas_->setCursor(cx - vw / 2, cy - 22);
+    canvas_->print(new_buf);
+
+    // Instructions
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_hint);
+    drawCenteredText_(cx, 196, "Rotate to change", colors::text_hint, 1);
+    drawCenteredText_(cx, 212, "Press to finish", colors::text_hint, 1);
+}
+
+void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
+{
+    (void)now_ms;
+
+    const int16_t cx = 120;
+    const int16_t cy = 120;
+    const int16_t w = 198;
+    const int16_t h = 132;
+    const int16_t x = cx - w / 2;
+    const int16_t y = cy - h / 2;
+
+    drawRoundedRect_(x, y, w, h, 12, colors::bg_elevated, true);
+    drawRoundedRect_(x, y, w, h, 12, colors::accent_blue, false);
+
+    const char* title = (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) ? "Keep change?" : "Settings";
+    canvas_->setTextSize(2);
+    canvas_->setTextColor(colors::text_primary);
+    const int16_t tw = static_cast<int16_t>(canvas_->textWidth(title));
+    canvas_->setCursor(cx - tw / 2, y + 14);
+    canvas_->print(title);
+
+    if (settings_popup_mode_ == SettingsPopupMode::ValueChangeConfirm) {
+        char old_line[44] = {0};
+        char new_line[44] = {0};
+
+        // Match the unit/label logic used in the editor screen.
+        const char* unit = "";
+        bool bool_is_mode = false;
+        switch (settings_editor_category_) {
+            case SettingsCategory::FatigueTest:
+                if (settings_editor_index_ == 2) { unit = "s"; }
+                else if (settings_editor_index_ == 3) { unit = "s"; }
+                break;
+            case SettingsCategory::BoundsFinding:
+                if (settings_editor_index_ == 1) { bool_is_mode = true; }
+                else if (settings_editor_index_ == 2) { unit = "rpm"; }
+                else if (settings_editor_index_ == 3) { unit = "rpm"; }
+                else if (settings_editor_index_ == 4) { unit = "x"; }
+                else if (settings_editor_index_ == 5) { unit = "rev/s^2"; }
+                break;
+            case SettingsCategory::UI:
+                if (settings_editor_index_ == 1) { unit = "%"; }
+                break;
+            case SettingsCategory::Main:
+                break;
+        }
+
+        const bool has_unit = (unit[0] != '\0');
+        switch (settings_editor_type_) {
+            case SettingsEditorValueType::U32:
+                if (has_unit) {
+                    snprintf(old_line, sizeof(old_line), "Old: %" PRIu32 " %s", settings_editor_u32_old_, unit);
+                    snprintf(new_line, sizeof(new_line), "New: %" PRIu32 " %s", settings_editor_u32_new_, unit);
+                } else {
+                    snprintf(old_line, sizeof(old_line), "Old: %" PRIu32, settings_editor_u32_old_);
+                    snprintf(new_line, sizeof(new_line), "New: %" PRIu32, settings_editor_u32_new_);
+                }
+                break;
+            case SettingsEditorValueType::F32:
+                if (has_unit) {
+                    snprintf(old_line, sizeof(old_line), "Old: %.2f %s", static_cast<double>(settings_editor_f32_old_), unit);
+                    snprintf(new_line, sizeof(new_line), "New: %.2f %s", static_cast<double>(settings_editor_f32_new_), unit);
+                } else {
+                    snprintf(old_line, sizeof(old_line), "Old: %.2f", static_cast<double>(settings_editor_f32_old_));
+                    snprintf(new_line, sizeof(new_line), "New: %.2f", static_cast<double>(settings_editor_f32_new_));
+                }
+                break;
+            case SettingsEditorValueType::Bool:
+                if (bool_is_mode) {
+                    snprintf(old_line, sizeof(old_line), "Old: %s", settings_editor_bool_old_ ? "StallGuard" : "Encoder");
+                    snprintf(new_line, sizeof(new_line), "New: %s", settings_editor_bool_new_ ? "StallGuard" : "Encoder");
+                } else {
+                    snprintf(old_line, sizeof(old_line), "Old: %s", settings_editor_bool_old_ ? "Yes" : "No");
+                    snprintf(new_line, sizeof(new_line), "New: %s", settings_editor_bool_new_ ? "Yes" : "No");
+                }
+                break;
+            case SettingsEditorValueType::U8: {
+                const int old_pct = static_cast<int>(settings_editor_u8_old_) * 100 / 255;
+                const int new_pct = static_cast<int>(settings_editor_u8_new_) * 100 / 255;
+                snprintf(old_line, sizeof(old_line), "Old: %d%%", old_pct);
+                snprintf(new_line, sizeof(new_line), "New: %d%%", new_pct);
+                break;
+            }
+            default:
+                snprintf(old_line, sizeof(old_line), "Old: -");
+                snprintf(new_line, sizeof(new_line), "New: -");
+                break;
+        }
+
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->setCursor(x + 16, y + 50);
+        canvas_->print(old_line);
+        canvas_->setCursor(x + 16, y + 68);
+        canvas_->print(new_line);
+
+        // Buttons
+        const int16_t btn_w = 84;
+        const int16_t btn_h = 32;
+        const int16_t btn_y = y + h - 44;
+        const Rect keep_btn{static_cast<int16_t>(cx - btn_w - 10), btn_y, btn_w, btn_h};
+        const Rect disc_btn{static_cast<int16_t>(cx + 10), btn_y, btn_w, btn_h};
+        drawButton_(keep_btn, "Keep", settings_popup_selection_ == 0, false);
+        drawButton_(disc_btn, "Discard", settings_popup_selection_ == 1, false);
     }
 }
 
@@ -1742,14 +2251,58 @@ void ui::UiController::drawTerminal_(uint32_t now_ms) noexcept
     const int16_t line_h = 14;
     const int max_lines = (log_bottom - log_top) / line_h;
     
-    // Scroll indicator (small dots on right edge)
+    // Scroll indicator (left edge, circular-bound style + springy ends)
     if (log_count_ > static_cast<size_t>(max_lines)) {
-        const float scroll_pos = 1.0f - static_cast<float>(scroll_lines_) / static_cast<float>(log_count_ - max_lines);
-        const int16_t dot_y = log_top + static_cast<int16_t>((log_bottom - log_top - 10) * scroll_pos);
-        canvas_->fillSmoothCircle(240 - 12, dot_y, 3, 0x6B9F);
-        // Track dots
-        canvas_->fillCircle(240 - 12, log_top + 5, 1, 0x4208);
-        canvas_->fillCircle(240 - 12, log_bottom - 5, 1, 0x4208);
+        const int max_scroll = std::max(0, static_cast<int>(log_count_) - max_lines);
+        const float scroll_pos = (max_scroll > 0)
+            ? (1.0f - static_cast<float>(scroll_lines_) / static_cast<float>(max_scroll))
+            : 1.0f;
+
+        const int16_t arc_top = static_cast<int16_t>(log_top + 8);
+        const int16_t arc_bottom = static_cast<int16_t>(log_bottom - 8);
+
+        int16_t dot_y = static_cast<int16_t>(arc_top + scroll_pos * static_cast<float>(arc_bottom - arc_top));
+        dot_y = std::clamp(dot_y, arc_top, arc_bottom);
+
+        const float r = 110.0f;
+        const float cy_arc = 120.0f;
+        const float dy = static_cast<float>(dot_y) - cy_arc;
+        const float dx = std::sqrt(std::max(0.0f, r * r - dy * dy));
+        const int16_t dot_x = 120 - static_cast<int16_t>(dx);
+
+        // Dot
+        canvas_->fillSmoothCircle(dot_x, dot_y, 4, colors::accent_blue);
+
+        // End markers
+        const float dy_top = static_cast<float>(arc_top) - cy_arc;
+        const float dx_top = std::sqrt(std::max(0.0f, r * r - dy_top * dy_top));
+        const int16_t x_top = 120 - static_cast<int16_t>(dx_top);
+        const float dy_bot = static_cast<float>(arc_bottom) - cy_arc;
+        const float dx_bot = std::sqrt(std::max(0.0f, r * r - dy_bot * dy_bot));
+        const int16_t x_bot = 120 - static_cast<int16_t>(dx_bot);
+        canvas_->fillCircle(x_top, arc_top, 1, colors::text_hint);
+        canvas_->fillCircle(x_bot, arc_bottom, 1, colors::text_hint);
+
+        // Springy end feedback
+        if (terminal_overscroll_px_ != 0.0f) {
+            const bool at_bottom = terminal_overscroll_px_ > 0.0f;
+            const int16_t spring_y = at_bottom ? arc_bottom : arc_top;
+            const float dy_s = static_cast<float>(spring_y) - cy_arc;
+            const float dx_s = std::sqrt(std::max(0.0f, r * r - dy_s * dy_s));
+            const int16_t spring_x = 120 - static_cast<int16_t>(dx_s);
+
+            const float amp = std::min(10.0f, std::fabs(terminal_overscroll_px_));
+            const int16_t rr = static_cast<int16_t>(4 + (amp * 0.25f));
+            canvas_->drawCircle(spring_x, spring_y, rr + 2, colors::accent_blue);
+        }
+
+        // Decay overscroll spring
+        terminal_overscroll_px_ *= 0.72f;
+        if (std::fabs(terminal_overscroll_px_) < 0.25f) {
+            terminal_overscroll_px_ = 0.0f;
+        }
+    } else {
+        terminal_overscroll_px_ = 0.0f;
     }
 
     // Render log lines - adjust width per line to fit in circle

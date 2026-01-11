@@ -123,10 +123,27 @@ private:
     // Settings popup for save confirmation
     enum class SettingsPopupMode : uint8_t {
         None = 0,
-        SaveConfirm  // Back pressed: SAVE & EXIT / DISCARD / CANCEL
+        SaveConfirm,       // Back pressed: SAVE & EXIT / DISCARD / CANCEL
+        ValueChangeConfirm // Value editor exit: KEEP / DISCARD
     };
     SettingsPopupMode settings_popup_mode_ = SettingsPopupMode::None;
     uint8_t settings_popup_selection_ = 0;
+
+    // Settings value editor (dedicated screen; no inline editing)
+    bool settings_value_editor_active_ = false;
+    SettingsCategory settings_editor_category_ = SettingsCategory::Main;
+    int settings_editor_index_ = 0;
+
+    enum class SettingsEditorValueType : uint8_t { None = 0, U32, F32, Bool, U8 };
+    SettingsEditorValueType settings_editor_type_ = SettingsEditorValueType::None;
+    uint32_t settings_editor_u32_old_ = 0;
+    uint32_t settings_editor_u32_new_ = 0;
+    float settings_editor_f32_old_ = 0.0f;
+    float settings_editor_f32_new_ = 0.0f;
+    bool settings_editor_bool_old_ = false;
+    bool settings_editor_bool_new_ = false;
+    uint8_t settings_editor_u8_old_ = 0;
+    uint8_t settings_editor_u8_new_ = 0;
 
     // Bounds finding
     bool bounds_running_ = false;
@@ -154,6 +171,7 @@ private:
     size_t log_count_ = 0;
     int scroll_lines_ = 0; // 0 = bottom
     bool encoder_scroll_mode_ = true;
+    float terminal_overscroll_px_ = 0.0f;
 
     // Touch tracking and gestures
     bool touch_dragging_ = false;
@@ -208,6 +226,10 @@ private:
     bool settingsHaveChanges_() const noexcept;
     int getSettingsItemCount_() const noexcept;
     void handleSettingsValueEdit_(int delta) noexcept;
+    void beginSettingsValueEditor_() noexcept;
+    bool settingsEditorHasChange_() const noexcept;
+    void applySettingsEditorValue_() noexcept;
+    void discardSettingsEditorValue_() noexcept;
     void drawBounds_(uint32_t now_ms) noexcept;
     void drawLiveCounter_(uint32_t now_ms) noexcept;
     void drawLivePopup_(uint32_t now_ms) noexcept;
