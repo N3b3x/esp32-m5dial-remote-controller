@@ -348,8 +348,6 @@ private:
     
     // Boot screen state
     bool boot_complete_ = false;
-    uint32_t boot_start_ms_ = 0;
-    static constexpr uint32_t BOOT_DURATION_MS_ = 1500;
 };
 
 } // namespace ui

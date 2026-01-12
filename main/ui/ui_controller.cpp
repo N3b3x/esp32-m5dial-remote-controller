@@ -3,6 +3,7 @@
 #include "M5Unified.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 
 #include "../protocol/espnow_protocol.hpp"
 #include "../settings.hpp"
@@ -80,7 +81,6 @@ void ui::UiController::Init() noexcept
     M5.Display.fillScreen(TFT_BLACK);
 
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-    boot_start_ms_ = now_ms;
     
     // Modern Boot Animation
     if (canvas_ != nullptr) {
