@@ -2519,6 +2519,25 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
         canvas_->print(new_buf);
     }
 
+    // Special hint for SGT
+    if (label != nullptr && strcmp(label, "SGT") == 0) {
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_hint);
+        
+        const char* line1 = "Lower value: more sensitive";
+        const char* line2 = "Higher value: less sensitive";
+        
+        const int16_t w1 = static_cast<int16_t>(canvas_->textWidth(line1));
+        const int16_t w2 = static_cast<int16_t>(canvas_->textWidth(line2));
+        
+        // Draw below the value/unit (approx y=150 area) and above action pills
+        canvas_->setCursor(cx - w1 / 2, 154);
+        canvas_->print(line1);
+        
+        canvas_->setCursor(cx - w2 / 2, 164);
+        canvas_->print(line2);
+    }
+
     // Instructions - styled pills at bottom (like quick settings)
     canvas_->setTextSize(1);
 
