@@ -64,6 +64,10 @@ struct StatusPayload {
     uint32_t cycle_number;
     uint8_t  state;    // TestState
     uint8_t  err_code;
+    // 1 = bounds may be reused (motor still energized + within validity window)
+    // 0 = bounds invalid, must re-run bounds finding
+    // 255 = unknown/unspecified (older unit firmware)
+    uint8_t  bounds_valid;
 };
 
 struct BoundsResultPayload {
@@ -102,10 +106,15 @@ inline ConfigPayload BuildConfigPayload(const Settings& settings) noexcept
 
 inline bool ParseStatus(const uint8_t* payload, size_t len, StatusPayload& out) noexcept
 {
-    if (payload == nullptr || len < sizeof(StatusPayload)) {
+    // Backward compatible: older units send only the first 6 bytes.
+    if (payload == nullptr || len < 6) {
         return false;
     }
-    std::memcpy(&out, payload, sizeof(StatusPayload));
+
+    std::memcpy(&out.cycle_number, payload, 4);
+    out.state = payload[4];
+    out.err_code = payload[5];
+    out.bounds_valid = (len >= 7) ? payload[6] : 255;
     return true;
 }
 

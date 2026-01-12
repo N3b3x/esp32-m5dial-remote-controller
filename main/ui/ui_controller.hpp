@@ -189,13 +189,33 @@ private:
         None = 0,
         StartConfirm,     // Idle state: CANCEL / START
         RunningActions,   // Running: BACK / PAUSE / STOP
-        PausedActions     // Paused: BACK / RESUME / STOP
+        PausedActions,    // Paused: BACK / RESUME / STOP
+        QuickSettings     // Long-press: quick settings menu
     };
     LiveFocus live_focus_ = LiveFocus::Actions;
     LivePopupMode live_popup_mode_ = LivePopupMode::None;
     uint8_t live_popup_selection_ = 0;
     uint8_t pending_command_id_ = 0;
     uint32_t pending_command_tick_ = 0;
+    
+    // Quick Settings (accessible via long-press on LiveCounter during Running/Paused)
+    // Items: 0=Back, 1=VMAX, 2=AMAX, 3=Dwell, 4=Cycles
+    static constexpr int kQuickSettingsItemCount_ = 5;
+    int quick_settings_index_ = 0;
+    bool quick_settings_editing_ = false;
+    
+    // Quick settings value editor state (similar to settings editor)
+    enum class QuickEditorType : uint8_t { None = 0, U32, F32 };
+    QuickEditorType quick_editor_type_ = QuickEditorType::None;
+    uint32_t quick_editor_u32_old_ = 0;
+    uint32_t quick_editor_u32_new_ = 0;
+    float quick_editor_f32_old_ = 0.0f;
+    float quick_editor_f32_new_ = 0.0f;
+    float quick_editor_f32_step_ = 1.0f;
+    
+    // Quick settings confirmation popup
+    bool quick_settings_confirm_popup_ = false;
+    uint8_t quick_settings_confirm_sel_ = 0;  // 0=Keep, 1=Revert
     
     // Brightness control (0-255)
     uint8_t brightness_ = 128;
@@ -285,6 +305,16 @@ private:
     void drawLivePopup_(uint32_t now_ms) noexcept;
     void handleLivePopupInput_(int delta, bool click, uint32_t now_ms) noexcept;
     void drawTerminal_(uint32_t now_ms) noexcept;
+    
+    // Quick Settings helpers (long-press during Running/Paused)
+    void drawQuickSettings_(uint32_t now_ms) noexcept;
+    void handleQuickSettingsInput_(int delta, bool click, uint32_t now_ms) noexcept;
+    void beginQuickSettingsEdit_() noexcept;
+    void handleQuickSettingsValueEdit_(int delta) noexcept;
+    void applyQuickSettingsValue_(uint32_t now_ms) noexcept;
+    void discardQuickSettingsValue_() noexcept;
+    bool quickEditorHasChange_() const noexcept;
+    void cycleQuickSettingsStep_() noexcept;
 
     // Modern UI helpers
     void drawProgressArc_(int16_t cx, int16_t cy, int16_t r, int16_t thickness,

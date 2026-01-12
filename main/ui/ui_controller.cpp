@@ -255,6 +255,17 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                     logf_(now_ms, "RX: Status cycle=%" PRIu32 " state=%u err=%u", status.cycle_number,
                           static_cast<unsigned>(status.state), static_cast<unsigned>(status.err_code));
 
+                    // If motor power has been disabled (or bounds expired), previously found bounds
+                    // must not be shown as valid. Clear cached bounds results so the UI forces a re-find.
+                    if (status.bounds_valid == 0 && bounds_have_result_) {
+                        boundsResetResult_();
+                        if (bounds_state_ == BoundsState::Complete) {
+                            bounds_state_ = BoundsState::Idle;
+                            bounds_state_since_ms_ = now_ms;
+                        }
+                        logf_(now_ms, "UI: cleared cached bounds (invalidated)");
+                    }
+
                     // If bounds UI is running, allow a state transition on real status.
                     const auto st = static_cast<fatigue_proto::TestState>(status.state);
                     if (page_ == Page::Bounds) {
@@ -503,6 +514,35 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
             return;
         }
     }
+    
+    // Quick Settings: long-press cycles step size when editing F32 values
+    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::QuickSettings) {
+        if (quick_settings_editing_ && quick_editor_type_ == QuickEditorType::F32 && M5.BtnA.wasReleasedAfterHold()) {
+            cycleQuickSettingsStep_();
+            playBeep_(1);
+            dirty_ = true;
+            return;
+        }
+    }
+    
+    // LiveCounter: long-press opens Quick Settings (only during Running/Paused)
+    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::None) {
+        if (M5.BtnA.wasReleasedAfterHold()) {
+            const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+            const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+            
+            if (test_state == fatigue_proto::TestState::Running || test_state == fatigue_proto::TestState::Paused) {
+                // Open quick settings
+                live_popup_mode_ = LivePopupMode::QuickSettings;
+                quick_settings_index_ = 0;
+                quick_settings_editing_ = false;
+                quick_settings_confirm_popup_ = false;
+                playBeep_(2);
+                dirty_ = true;
+                return;
+            }
+        }
+    }
 
     if (M5.BtnA.wasClicked()) {
         onClick_(now_ms);
@@ -667,6 +707,11 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         return;
     }
 
+    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::QuickSettings) {
+        handleQuickSettingsInput_(delta, false, now_ms);
+        return;
+    }
+
     if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::None) {
         if (delta != 0) {
             live_focus_ = (live_focus_ == LiveFocus::Actions) ? LiveFocus::Back : LiveFocus::Actions;
@@ -805,6 +850,12 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
     }
 
     if (page_ == Page::LiveCounter) {
+        // Handle QuickSettings popup separately
+        if (live_popup_mode_ == LivePopupMode::QuickSettings) {
+            handleQuickSettingsInput_(0, true, now_ms);
+            return;
+        }
+        
         // Encoder navigation: allow selecting Back vs Actions without touch.
         if (live_popup_mode_ == LivePopupMode::None && live_focus_ == LiveFocus::Back) {
             const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
@@ -2690,6 +2741,10 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
 void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
 {
     // Check if popup is active
+    if (live_popup_mode_ == LivePopupMode::QuickSettings) {
+        drawQuickSettings_(now_ms);
+        return;
+    }
     if (live_popup_mode_ != LivePopupMode::None) {
         drawLivePopup_(now_ms);
         return;
@@ -2804,9 +2859,14 @@ void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
     const int16_t hint_y = 240 - 28;
     canvas_->setTextSize(1);
     canvas_->setTextColor(colors::text_hint);
-    drawCenteredText_(cx, hint_y,
-        (live_focus_ == LiveFocus::Back) ? "Press dial: back" : "Press dial: actions",
-        colors::text_hint, 1);
+    
+    // Show different hints based on state
+    const char* hint_text = (live_focus_ == LiveFocus::Back) ? "Press: back" : "Press: actions";
+    if (test_state == fatigue_proto::TestState::Running || test_state == fatigue_proto::TestState::Paused) {
+        // During test: show that long-press opens quick settings (abbreviated to fit)
+        hint_text = (live_focus_ == LiveFocus::Back) ? "Press: back" : "Click: menu | Hold: cfg";
+    }
+    drawCenteredText_(cx, hint_y, hint_text, colors::text_hint, 1);
     
     // Touch target indicator (subtle arc at bottom)
     canvas_->drawArc(cx, cy, 98, 96, 160, 200, colors::bg_elevated);
@@ -3042,6 +3102,419 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
         }
         
         dirty_ = true;
+    }
+}
+
+// ============================================================================
+// Quick Settings - accessible via long-press on LiveCounter during test
+// ============================================================================
+
+void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
+{
+    (void)now_ms;
+    
+    const int16_t cx = th::CENTER_X;
+    const int16_t cy = th::CENTER_Y;
+    
+    // Full-screen overlay with dark background
+    canvas_->fillScreen(colors::bg_primary);
+    canvas_->drawCircle(cx, cy, 118, colors::bg_elevated);
+    
+    // Title - use size 1 with bold simulation for compact fit
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_primary);
+    const char* title = "Quick Config";
+    int16_t tw = static_cast<int16_t>(canvas_->textWidth(title));
+    // Draw twice offset by 1px for bold effect
+    canvas_->setCursor(cx - tw / 2, 22);
+    canvas_->print(title);
+    canvas_->setCursor(cx - tw / 2 + 1, 22);
+    canvas_->print(title);
+    
+    // Subtitle hint
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_hint);
+    const char* hint = "Adjust mid-test";
+    const int16_t hw = static_cast<int16_t>(canvas_->textWidth(hint));
+    canvas_->setCursor(cx - hw / 2, 36);
+    canvas_->print(hint);
+    
+    // Item layout: compact vertical list
+    // Items: 0=< Back, 1=VMAX, 2=AMAX, 3=Dwell, 4=Cycles
+    static constexpr int16_t kItemH = 36;
+    static constexpr int16_t kListTop = 50;
+    static constexpr int16_t kListW = 190;
+    static constexpr int16_t kListX = (240 - kListW) / 2;
+    
+    const char* labels[kQuickSettingsItemCount_] = {
+        "< Back",
+        "VMAX",
+        "AMAX", 
+        "Dwell",
+        "Cycles"
+    };
+    
+    // Format current values
+    char values[kQuickSettingsItemCount_][24];
+    values[0][0] = '\0';  // Back has no value
+    
+    if (quick_settings_editing_ && quick_settings_index_ == 1) {
+        snprintf(values[1], sizeof(values[1]), "%.1f RPM", static_cast<double>(quick_editor_f32_new_));
+    } else {
+        snprintf(values[1], sizeof(values[1]), "%.1f RPM", static_cast<double>(edit_settings_.test_unit.oscillation_vmax_rpm));
+    }
+    
+    if (quick_settings_editing_ && quick_settings_index_ == 2) {
+        snprintf(values[2], sizeof(values[2]), "%.2f", static_cast<double>(quick_editor_f32_new_));
+    } else {
+        snprintf(values[2], sizeof(values[2]), "%.2f", static_cast<double>(edit_settings_.test_unit.oscillation_amax_rev_s2));
+    }
+    
+    if (quick_settings_editing_ && quick_settings_index_ == 3) {
+        const float dwell_sec = static_cast<float>(quick_editor_u32_new_) * 0.5f;
+        snprintf(values[3], sizeof(values[3]), "%.1f s", static_cast<double>(dwell_sec));
+    } else {
+        const float dwell_sec = static_cast<float>(edit_settings_.test_unit.dwell_time_ms) / 1000.0f;
+        snprintf(values[3], sizeof(values[3]), "%.1f s", static_cast<double>(dwell_sec));
+    }
+    
+    if (quick_settings_editing_ && quick_settings_index_ == 4) {
+        if (quick_editor_u32_new_ == 0) {
+            snprintf(values[4], sizeof(values[4]), "Infinite");
+        } else {
+            snprintf(values[4], sizeof(values[4]), "%" PRIu32, quick_editor_u32_new_);
+        }
+    } else {
+        if (edit_settings_.test_unit.cycle_amount == 0) {
+            snprintf(values[4], sizeof(values[4]), "Infinite");
+        } else {
+            snprintf(values[4], sizeof(values[4]), "%" PRIu32, edit_settings_.test_unit.cycle_amount);
+        }
+    }
+    
+    for (int i = 0; i < kQuickSettingsItemCount_; ++i) {
+        const int16_t y = kListTop + i * kItemH;
+        const bool selected = (quick_settings_index_ == i);
+        const bool editing = (quick_settings_editing_ && quick_settings_index_ == i);
+        
+        // Background
+        if (selected) {
+            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 4, 8, 
+                editing ? colors::accent_orange : colors::accent_blue);
+        } else {
+            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 4, 8, colors::bg_elevated);
+        }
+        
+        // Label - larger text for readability
+        canvas_->setTextSize(2);
+        canvas_->setTextColor(selected ? colors::bg_primary : colors::text_secondary);
+        canvas_->setCursor(kListX + 8, y + 6);
+        canvas_->print(labels[i]);
+        
+        // Value (right-aligned) - keep size 2 for consistency
+        if (i > 0) {
+            const int16_t vw = static_cast<int16_t>(canvas_->textWidth(values[i]));
+            canvas_->setCursor(kListX + kListW - vw - 8, y + 6);
+            canvas_->print(values[i]);
+        }
+    }
+    
+    // Bottom hint - show step info when editing F32
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::text_hint);
+    const char* action_hint;
+    char hint_buf[48];
+    if (quick_settings_editing_) {
+        if (quick_editor_type_ == QuickEditorType::F32) {
+            snprintf(hint_buf, sizeof(hint_buf), "Step:%.2f | Hold:step", static_cast<double>(quick_editor_f32_step_));
+            action_hint = hint_buf;
+        } else {
+            action_hint = "Rotate: adjust";
+        }
+    } else {
+        action_hint = "Click: edit | Back: return";
+    }
+    const int16_t ahw = static_cast<int16_t>(canvas_->textWidth(action_hint));
+    canvas_->setCursor(cx - ahw / 2, 232 - 12);
+    canvas_->print(action_hint);
+    
+    // Draw confirmation popup if active
+    if (quick_settings_confirm_popup_) {
+        // Popup overlay
+        const int16_t pw = 160;
+        const int16_t ph = 80;
+        const int16_t px = cx - pw / 2;
+        const int16_t py = cy - ph / 2;
+        
+        canvas_->fillSmoothRoundRect(px, py, pw, ph, 12, colors::bg_elevated);
+        canvas_->drawRoundRect(px, py, pw, ph, 12, colors::accent_blue);
+        
+        // Title
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_primary);
+        const char* popup_title = "Apply change?";
+        const int16_t ptw = static_cast<int16_t>(canvas_->textWidth(popup_title));
+        canvas_->setCursor(cx - ptw / 2, py + 12);
+        canvas_->print(popup_title);
+        
+        // Buttons: Keep / Revert
+        const int16_t btn_w = 60;
+        const int16_t btn_h = 26;
+        const int16_t btn_y = py + ph - btn_h - 10;
+        const int16_t keep_x = px + 15;
+        const int16_t revert_x = px + pw - btn_w - 15;
+        
+        // Keep button
+        const bool keep_sel = (quick_settings_confirm_sel_ == 0);
+        canvas_->fillSmoothRoundRect(keep_x, btn_y, btn_w, btn_h, 6,
+            keep_sel ? colors::accent_green : colors::bg_primary);
+        canvas_->setTextColor(keep_sel ? colors::bg_primary : colors::text_secondary);
+        canvas_->setCursor(keep_x + 12, btn_y + 8);
+        canvas_->print("Keep");
+        
+        // Revert button
+        const bool revert_sel = (quick_settings_confirm_sel_ == 1);
+        canvas_->fillSmoothRoundRect(revert_x, btn_y, btn_w, btn_h, 6,
+            revert_sel ? colors::state_error : colors::bg_primary);
+        canvas_->setTextColor(revert_sel ? colors::bg_primary : colors::text_secondary);
+        canvas_->setCursor(revert_x + 6, btn_y + 8);
+        canvas_->print("Revert");
+    }
+}
+
+void ui::UiController::handleQuickSettingsInput_(int delta, bool click, uint32_t now_ms) noexcept
+{
+    // Handle confirmation popup first
+    if (quick_settings_confirm_popup_) {
+        if (delta != 0) {
+            quick_settings_confirm_sel_ = (quick_settings_confirm_sel_ == 0) ? 1 : 0;
+            playBeep_(delta > 0 ? 1 : 0);
+            dirty_ = true;
+        }
+        if (click) {
+            playBeep_(2);
+            if (quick_settings_confirm_sel_ == 0) {
+                // Keep - apply and send
+                applyQuickSettingsValue_(now_ms);
+            } else {
+                // Revert
+                discardQuickSettingsValue_();
+            }
+            quick_settings_confirm_popup_ = false;
+            quick_settings_confirm_sel_ = 0;
+            quick_settings_editing_ = false;
+            quick_editor_type_ = QuickEditorType::None;
+            dirty_ = true;
+        }
+        return;
+    }
+    
+    // Handle editing mode
+    if (quick_settings_editing_) {
+        if (delta != 0) {
+            handleQuickSettingsValueEdit_(delta);
+            dirty_ = true;
+        }
+        if (click) {
+            // Check if value changed
+            if (quickEditorHasChange_()) {
+                // Show confirmation popup
+                quick_settings_confirm_popup_ = true;
+                quick_settings_confirm_sel_ = 0;  // Default to Keep
+                playBeep_(2);
+            } else {
+                // No change, just exit editing
+                quick_settings_editing_ = false;
+                quick_editor_type_ = QuickEditorType::None;
+                playBeep_(2);
+            }
+            dirty_ = true;
+        }
+        return;
+    }
+    
+    // Normal navigation
+    if (delta != 0) {
+        quick_settings_index_ = (quick_settings_index_ + delta + kQuickSettingsItemCount_) % kQuickSettingsItemCount_;
+        playBeep_(delta > 0 ? 1 : 0);
+        dirty_ = true;
+    }
+    
+    if (click) {
+        if (quick_settings_index_ == 0) {
+            // Back - exit quick settings
+            live_popup_mode_ = LivePopupMode::None;
+            playBeep_(2);
+        } else {
+            // Enter edit mode for this item
+            beginQuickSettingsEdit_();
+            playBeep_(2);
+        }
+        dirty_ = true;
+    }
+}
+
+void ui::UiController::beginQuickSettingsEdit_() noexcept
+{
+    quick_settings_editing_ = true;
+    quick_editor_type_ = QuickEditorType::None;
+    
+    switch (quick_settings_index_) {
+        case 1:  // VMAX (F32)
+            quick_editor_type_ = QuickEditorType::F32;
+            quick_editor_f32_old_ = edit_settings_.test_unit.oscillation_vmax_rpm;
+            quick_editor_f32_new_ = quick_editor_f32_old_;
+            quick_editor_f32_step_ = 1.0f;  // 1 RPM steps
+            break;
+        case 2:  // AMAX (F32)
+            quick_editor_type_ = QuickEditorType::F32;
+            quick_editor_f32_old_ = edit_settings_.test_unit.oscillation_amax_rev_s2;
+            quick_editor_f32_new_ = quick_editor_f32_old_;
+            quick_editor_f32_step_ = 0.1f;  // 0.1 rev/s² steps
+            break;
+        case 3:  // Dwell (U32 in half-seconds)
+            quick_editor_type_ = QuickEditorType::U32;
+            quick_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 250u) / 500u;
+            quick_editor_u32_new_ = quick_editor_u32_old_;
+            break;
+        case 4:  // Cycles (U32)
+            quick_editor_type_ = QuickEditorType::U32;
+            quick_editor_u32_old_ = edit_settings_.test_unit.cycle_amount;
+            quick_editor_u32_new_ = quick_editor_u32_old_;
+            break;
+        default:
+            quick_settings_editing_ = false;
+            break;
+    }
+}
+
+void ui::UiController::handleQuickSettingsValueEdit_(int delta) noexcept
+{
+    if (!quick_settings_editing_ || delta == 0) {
+        return;
+    }
+    
+    playBeep_(delta > 0 ? 1 : 0);
+    
+    switch (quick_editor_type_) {
+        case QuickEditorType::F32: {
+            const float next = quick_editor_f32_new_ + quick_editor_f32_step_ * static_cast<float>(delta);
+            quick_editor_f32_new_ = std::max(0.1f, std::round(next * 10.0f) / 10.0f);
+            break;
+        }
+        case QuickEditorType::U32: {
+            const int64_t step = (quick_settings_index_ == 4) ? 10 : 1;  // Cycles: step by 10
+            const int64_t next = static_cast<int64_t>(quick_editor_u32_new_) + static_cast<int64_t>(delta) * step;
+            quick_editor_u32_new_ = static_cast<uint32_t>(std::max(int64_t{0}, next));
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+bool ui::UiController::quickEditorHasChange_() const noexcept
+{
+    switch (quick_editor_type_) {
+        case QuickEditorType::F32:
+            return std::fabs(static_cast<double>(quick_editor_f32_new_ - quick_editor_f32_old_)) > 0.001;
+        case QuickEditorType::U32:
+            return quick_editor_u32_new_ != quick_editor_u32_old_;
+        default:
+            return false;
+    }
+}
+
+void ui::UiController::cycleQuickSettingsStep_() noexcept
+{
+    if (quick_editor_type_ != QuickEditorType::F32) {
+        return;
+    }
+    
+    // Define step options based on which value is being edited
+    if (quick_settings_index_ == 1) {
+        // VMAX: 0.1, 1, 5, 10 RPM steps
+        static constexpr float kVmaxSteps[] = {0.1f, 1.0f, 5.0f, 10.0f};
+        static constexpr size_t kVmaxCount = sizeof(kVmaxSteps) / sizeof(kVmaxSteps[0]);
+        
+        size_t idx = 0;
+        for (size_t i = 0; i < kVmaxCount; ++i) {
+            if (std::fabs(static_cast<double>(kVmaxSteps[i] - quick_editor_f32_step_)) < 1e-6) {
+                idx = i;
+                break;
+            }
+        }
+        idx = (idx + 1) % kVmaxCount;
+        quick_editor_f32_step_ = kVmaxSteps[idx];
+    } else if (quick_settings_index_ == 2) {
+        // AMAX: 0.01, 0.1, 0.5, 1 rev/s² steps
+        static constexpr float kAmaxSteps[] = {0.01f, 0.1f, 0.5f, 1.0f};
+        static constexpr size_t kAmaxCount = sizeof(kAmaxSteps) / sizeof(kAmaxSteps[0]);
+        
+        size_t idx = 0;
+        for (size_t i = 0; i < kAmaxCount; ++i) {
+            if (std::fabs(static_cast<double>(kAmaxSteps[i] - quick_editor_f32_step_)) < 1e-6) {
+                idx = i;
+                break;
+            }
+        }
+        idx = (idx + 1) % kAmaxCount;
+        quick_editor_f32_step_ = kAmaxSteps[idx];
+    }
+}
+
+void ui::UiController::applyQuickSettingsValue_(uint32_t now_ms) noexcept
+{
+    // Apply the value to edit_settings_
+    switch (quick_settings_index_) {
+        case 1:  // VMAX
+            edit_settings_.test_unit.oscillation_vmax_rpm = std::max(5.0f, quick_editor_f32_new_);
+            break;
+        case 2:  // AMAX
+            edit_settings_.test_unit.oscillation_amax_rev_s2 = std::max(0.5f, quick_editor_f32_new_);
+            break;
+        case 3:  // Dwell (convert half-seconds to ms)
+            edit_settings_.test_unit.dwell_time_ms = quick_editor_u32_new_ * 500u;
+            break;
+        case 4:  // Cycles
+            edit_settings_.test_unit.cycle_amount = quick_editor_u32_new_;
+            break;
+        default:
+            return;
+    }
+    
+    // Also update the main settings
+    if (settings_ != nullptr) {
+        *settings_ = edit_settings_;
+        (void)SettingsStore::Save(*settings_);
+    }
+    
+    // Send config to unit immediately
+    if (conn_status_ == ConnStatus::Connected) {
+        const auto payload = fatigue_proto::BuildConfigPayload(edit_settings_);
+        const bool ok = espnow::SendConfigSet(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_, &payload, sizeof(payload));
+        if (ok) {
+            logf_(now_ms, "TX: Quick config update sent");
+        } else {
+            logf_(now_ms, "TX: Quick config FAILED");
+        }
+    } else {
+        logf_(now_ms, "TX: Quick config skipped (not connected)");
+    }
+}
+
+void ui::UiController::discardQuickSettingsValue_() noexcept
+{
+    // Just reset the editor values - no changes applied
+    switch (quick_editor_type_) {
+        case QuickEditorType::F32:
+            quick_editor_f32_new_ = quick_editor_f32_old_;
+            break;
+        case QuickEditorType::U32:
+            quick_editor_u32_new_ = quick_editor_u32_old_;
+            break;
+        default:
+            break;
     }
 }
 
