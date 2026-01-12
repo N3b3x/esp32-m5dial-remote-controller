@@ -515,9 +515,9 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
         }
     }
     
-    // Quick Settings: long-press cycles step size when editing F32 values
+    // Quick Settings: long-press cycles step size when editing (F32 or U32)
     if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::QuickSettings) {
-        if (quick_settings_editing_ && quick_editor_type_ == QuickEditorType::F32 && M5.BtnA.wasReleasedAfterHold()) {
+        if (quick_settings_editing_ && (quick_editor_type_ == QuickEditorType::F32 || quick_editor_type_ == QuickEditorType::U32) && M5.BtnA.wasReleasedAfterHold()) {
             cycleQuickSettingsStep_();
             playBeep_(1);
             dirty_ = true;
@@ -3205,23 +3205,21 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
             canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 2, 6, colors::bg_elevated);
         }
         
-        // Label - smaller text size for compact layout
-        canvas_->setTextSize(1);
+        // Label - text size 2 for better readability
+        canvas_->setTextSize(2);
         canvas_->setTextColor(selected ? colors::bg_primary : colors::text_secondary);
-        canvas_->setCursor(kListX + 6, y + 8);
+        canvas_->setCursor(kListX + 8, y + 5);
         canvas_->print(labels[i]);
         
         // Value (right-aligned)
         if (i > 0) {
             const int16_t vw = static_cast<int16_t>(canvas_->textWidth(values[i]));
-            canvas_->setCursor(kListX + kListW - vw - 6, y + 8);
+            canvas_->setCursor(kListX + kListW - vw - 8, y + 5);
             canvas_->print(values[i]);
         }
     }
     
-    // Bottom hint - show step info when editing
-    canvas_->setTextSize(1);
-    canvas_->setTextColor(colors::text_hint);
+    // Bottom hint - show step info when editing, in a styled pill
     const char* action_hint;
     char hint_buf[48];
     if (quick_settings_editing_) {
@@ -3235,11 +3233,20 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
             action_hint = "Rotate: adjust";
         }
     } else {
-        action_hint = "Click: edit | Back: exit";
+        action_hint = "Click:edit | Back:exit";
     }
+    canvas_->setTextSize(1);
     const int16_t ahw = static_cast<int16_t>(canvas_->textWidth(action_hint));
-    // Position hint at y=202 - after last item (48 + 5*30 = 198) with small gap
-    canvas_->setCursor(cx - ahw / 2, 205);
+    const int16_t pill_w = ahw + 16;  // padding on each side
+    const int16_t pill_h = 18;
+    const int16_t pill_x = cx - pill_w / 2;
+    const int16_t pill_y = 205;
+    // Draw pill background with border
+    canvas_->fillSmoothRoundRect(pill_x, pill_y, pill_w, pill_h, 9, colors::bg_elevated);
+    canvas_->drawRoundRect(pill_x, pill_y, pill_w, pill_h, 9, colors::text_hint);
+    // Draw text centered in pill
+    canvas_->setTextColor(colors::text_secondary);
+    canvas_->setCursor(cx - ahw / 2, pill_y + 4);
     canvas_->print(action_hint);
     
     // Draw confirmation popup if active
