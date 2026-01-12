@@ -280,6 +280,7 @@ private:
     void settingsSave_(uint32_t now_ms) noexcept;
 
     void draw_(uint32_t now_ms) noexcept;
+    void drawBootScreen_(uint32_t now_ms, float progress) noexcept;
     void drawHeader_(const char* title) noexcept;
     void drawBackButton_() noexcept;
     void drawConnectionIndicator_(uint32_t now_ms) noexcept;
