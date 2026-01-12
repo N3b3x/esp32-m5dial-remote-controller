@@ -241,7 +241,9 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
             // We just (re)connected; force a resync on the next ConfigResponse so
             // any offline edits do not linger or get partially overwritten.
             pending_machine_resync_ = true;
-            logf_(now_ms, "Connected to fatigue tester");
+            // Immediately poll all info on fresh connection
+            (void)espnow::SendConfigRequest(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_);
+            logf_(now_ms, "Connected to fatigue tester - polling config and status");
         }
 
         switch (evt.type) {
@@ -399,7 +401,12 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
     // Check for connection timeout
     if (conn_status_ == ConnStatus::Connected && (now_ms - last_rx_ms_) > kConnTimeout_ms) {
         conn_status_ = ConnStatus::Connecting;
-        logf_(now_ms, "Connection timeout - reconnecting");
+        // Clear stale status data - don't show old "Idle" or "Running" when disconnected
+        have_status_ = false;
+        have_remote_config_ = false;
+        last_status_ = {};
+        last_remote_config_ = {};
+        logf_(now_ms, "Connection timeout - cleared stale status data");
         dirty_ = true;
     }
 }
@@ -800,7 +807,8 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
     if (page_ == Page::LiveCounter) {
         // Encoder navigation: allow selecting Back vs Actions without touch.
         if (live_popup_mode_ == LivePopupMode::None && live_focus_ == LiveFocus::Back) {
-            const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+            const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+            const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
 
             // Safety: do not exit while running/paused. Instead, open the actions popup.
             if (test_state == fatigue_proto::TestState::Running) {
@@ -831,7 +839,9 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
         }
         
         // Show appropriate popup based on current state
-        const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+        // Only use status if connected - don't show stale data when disconnected
+        const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+        const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
         
         switch (test_state) {
             case fatigue_proto::TestState::Idle:
@@ -980,7 +990,8 @@ void ui::UiController::onSwipe_(int16_t dx, int16_t dy, uint32_t now_ms) noexcep
 
     // Live Counter: while actively running/paused, avoid accidental exits via swipe.
     // Back button remains the explicit exit path.
-    if (page_ == Page::LiveCounter && have_status_) {
+    // Only check status if connected - don't use stale data when disconnected
+    if (page_ == Page::LiveCounter && conn_status_ == ConnStatus::Connected && have_status_) {
         const auto st = static_cast<fatigue_proto::TestState>(last_status_.state);
         if (st == fatigue_proto::TestState::Running || st == fatigue_proto::TestState::Paused) {
             return;
@@ -1806,6 +1817,50 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
     const int16_t cx = menu_config_.center_x;
     const int16_t cy = menu_config_.center_y;
     canvas_->drawCircle(cx, cy, 119, 0x2104);  // Subtle ring at edge
+
+    // Connection status pill (centered, above the Live Counter menu icon).
+    {
+        const char* conn_text = "DISCONNECTED";
+        uint16_t conn_color = colors::accent_red;
+        switch (conn_status_) {
+            case ConnStatus::Connected:
+                conn_text = "CONNECTED";
+                conn_color = colors::accent_green;
+                break;
+            case ConnStatus::Connecting:
+                conn_text = "CONNECTING";
+                conn_color = colors::accent_yellow;
+                break;
+            case ConnStatus::Disconnected:
+            default:
+                break;
+        }
+
+        constexpr int kLiveIndex = 2; // kMenuItems_[2] = Live Counter
+        const Point2D live_pos = menu_selector_.getIconPosition(kLiveIndex);
+        const int16_t live_y = static_cast<int16_t>(live_pos.y);
+
+        constexpr int16_t kPillH = 16;
+        constexpr int16_t kPadX = 8;
+        constexpr int16_t kRadius = 8;
+        constexpr int16_t kGap = 6;
+        const int16_t pill_center_y = static_cast<int16_t>(live_y - menu_config_.icon_bg_radius - kGap - (kPillH / 2));
+
+        canvas_->setTextSize(1);
+        const int16_t tw = static_cast<int16_t>(canvas_->textWidth(conn_text));
+        const int16_t pill_w = static_cast<int16_t>(tw + (kPadX * 2));
+        int16_t pill_x = static_cast<int16_t>(cx - (pill_w / 2));
+        int16_t pill_y = static_cast<int16_t>(pill_center_y - (kPillH / 2));
+        if (pill_x < 4) pill_x = 4;
+        if ((pill_x + pill_w) > 236) pill_x = static_cast<int16_t>(236 - pill_w);
+        if (pill_y < 4) pill_y = 4;
+
+        canvas_->fillRoundRect(pill_x, pill_y, pill_w, kPillH, kRadius, colors::bg_card);
+        canvas_->drawRoundRect(pill_x, pill_y, pill_w, kPillH, kRadius, conn_color);
+        canvas_->setTextColor(conn_color);
+        canvas_->setCursor(static_cast<int16_t>(pill_x + kPadX), static_cast<int16_t>(pill_y + 4));
+        canvas_->print(conn_text);
+    }
     
     // Draw connection indicator
     drawConnectionIndicator_(now_ms);
@@ -1841,7 +1896,8 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
         canvas_->print(text);
     };
 
-    if (have_status_) {
+    // Only show status if connected - don't show stale "Idle" or "Running" when disconnected
+    if (conn_status_ == ConnStatus::Connected && have_status_) {
         const char* state_str = "IDLE";
         uint16_t state_color = colors::state_idle;
         switch (static_cast<fatigue_proto::TestState>(last_status_.state)) {
@@ -2587,9 +2643,27 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
         char buf2[32];
         snprintf(buf1, sizeof(buf1), "MIN %.1f\xB0", static_cast<double>(min_deg));
         snprintf(buf2, sizeof(buf2), "MAX %.1f\xB0", static_cast<double>(max_deg));
+
+        // Put the numbers on a dark pill so they stay readable even when the
+        // blue window highlight passes behind them.
         canvas_->setTextSize(1);
-        drawCenteredText_(cx - 48, 132, buf1, colors::accent_orange, 1);
-        drawCenteredText_(cx + 48, 132, buf2, colors::accent_orange, 1);
+        const int16_t y = 150;
+        constexpr int16_t kPadX = 8;
+        constexpr int16_t kPillH = 18;
+        constexpr int16_t kRadius = 9;
+        const auto draw_value_pill = [&](int16_t center_x, const char* text) {
+            const int16_t tw = static_cast<int16_t>(canvas_->textWidth(text));
+            const int16_t pill_w = static_cast<int16_t>(tw + (kPadX * 2));
+            const int16_t x = static_cast<int16_t>(center_x - (pill_w / 2));
+            canvas_->fillRoundRect(x, y, pill_w, kPillH, kRadius, colors::bg_card);
+            canvas_->drawRoundRect(x, y, pill_w, kPillH, kRadius, colors::accent_orange);
+            canvas_->setTextColor(colors::accent_orange);
+            canvas_->setCursor(static_cast<int16_t>(x + kPadX), static_cast<int16_t>(y + 5));
+            canvas_->print(text);
+        };
+
+        draw_value_pill(static_cast<int16_t>(cx - 56), buf1);
+        draw_value_pill(static_cast<int16_t>(cx + 56), buf2);
     }
 
     // === BOTTOM CONTROLS (Back + Start/Stop) ===
@@ -2621,9 +2695,11 @@ void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
 
     const int16_t cx = th::CENTER_X;
     const int16_t cy = th::CENTER_Y;
-    const uint32_t cycle = have_status_ ? last_status_.cycle_number : 0;
+    // Only use status if connected - don't show stale data when disconnected
+    const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+    const uint32_t cycle = use_status ? last_status_.cycle_number : 0;
     const uint32_t target = edit_settings_.test_unit.cycle_amount;
-    const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+    const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
 
     // Check pending command timeout
     if (pending_command_id_ != 0 && (now_ms - pending_command_tick_ > 2500)) {
