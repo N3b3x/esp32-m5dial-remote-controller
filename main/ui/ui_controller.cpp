@@ -505,9 +505,9 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
     }
 
     // Button actions via M5Unified.
-    // In the Settings value editor: long-press cycles step size (for float editors) instead of finishing.
+    // In the Settings value editor: long-press cycles step size (for float or U32 editors) instead of finishing.
     if (page_ == Page::Settings && settings_value_editor_active_) {
-        if (settings_editor_type_ == SettingsEditorValueType::F32 && M5.BtnA.wasReleasedAfterHold()) {
+        if ((settings_editor_type_ == SettingsEditorValueType::F32 || settings_editor_type_ == SettingsEditorValueType::U32) && M5.BtnA.wasReleasedAfterHold()) {
             cycleSettingsEditorStep_();
             playBeep_(1);
             dirty_ = true;
@@ -862,7 +862,15 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
         
         // Encoder navigation: allow selecting Back vs Actions without touch.
         if (live_popup_mode_ == LivePopupMode::None && live_focus_ == LiveFocus::Back) {
-            const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+            // If disconnected, allow direct exit without any popup
+            if (conn_status_ != ConnStatus::Connected) {
+                page_ = Page::Landing;
+                playBeep_(2);
+                dirty_ = true;
+                return;
+            }
+            
+            const bool use_status = have_status_;
             const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
 
             // Safety: do not exit while running/paused. Instead, open the actions popup.
@@ -893,10 +901,16 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             return;
         }
         
+        // If disconnected, allow direct exit without showing action popup
+        if (conn_status_ != ConnStatus::Connected) {
+            page_ = Page::Landing;
+            playBeep_(2);
+            dirty_ = true;
+            return;
+        }
+        
         // Show appropriate popup based on current state
-        // Only use status if connected - don't show stale data when disconnected
-        const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
-        const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+        const auto test_state = have_status_ ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
         
         switch (test_state) {
             case fatigue_proto::TestState::Idle:
@@ -1312,6 +1326,7 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 settings_editor_type_ = SettingsEditorValueType::U32;
                 settings_editor_u32_old_ = edit_settings_.test_unit.cycle_amount;
                 settings_editor_u32_new_ = settings_editor_u32_old_;
+                settings_editor_u32_step_ = 10;  // Start with step of 10
             } else if (settings_index_ == 2) {
                 // VMAX (F32 RPM)
                 settings_editor_type_ = SettingsEditorValueType::F32;
@@ -1330,6 +1345,7 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 // Represent dwell in half-seconds to allow 0.5s encoder steps.
                 settings_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 250u) / 500u;
                 settings_editor_u32_new_ = settings_editor_u32_old_;
+                settings_editor_u32_step_ = 1;  // Start with 0.5s increments
             }
             break;
 
@@ -1392,8 +1408,7 @@ void ui::UiController::handleSettingsValueEdit_(int delta) noexcept
 
     switch (settings_editor_type_) {
         case SettingsEditorValueType::U32: {
-            const uint32_t step = (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 1) ? 10 : 1;
-            settings_editor_u32_new_ = clamp_add_u32(settings_editor_u32_new_, delta, step);
+            settings_editor_u32_new_ = clamp_add_u32(settings_editor_u32_new_, delta, settings_editor_u32_step_);
             break;
         }
         case SettingsEditorValueType::F32: {
@@ -1473,33 +1488,68 @@ void ui::UiController::initSettingsEditorStep_() noexcept
 
 void ui::UiController::cycleSettingsEditorStep_() noexcept
 {
-    if (settings_editor_type_ != SettingsEditorValueType::F32) {
+    // Handle F32 types (VMAX, AMAX, velocity, etc.)
+    if (settings_editor_type_ == SettingsEditorValueType::F32) {
+        const float* steps = nullptr;
+        size_t count = 0;
+        getSettingsEditorF32StepOptions_(steps, count);
+        if (steps == nullptr || count == 0) {
+            return;
+        }
+
+        // Find current step in the option list, then advance.
+        size_t idx = 0;
+        const float cur = settings_editor_f32_step_;
+        bool found = false;
+        for (size_t i = 0; i < count; ++i) {
+            if (std::fabs(static_cast<double>(steps[i] - cur)) < 1e-6) {
+                idx = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            idx = 0;
+        }
+        idx = (idx + 1) % count;
+        settings_editor_f32_step_ = steps[idx];
         return;
     }
-
-    const float* steps = nullptr;
-    size_t count = 0;
-    getSettingsEditorF32StepOptions_(steps, count);
-    if (steps == nullptr || count == 0) {
-        return;
-    }
-
-    // Find current step in the option list, then advance.
-    size_t idx = 0;
-    const float cur = settings_editor_f32_step_;
-    bool found = false;
-    for (size_t i = 0; i < count; ++i) {
-        if (std::fabs(static_cast<double>(steps[i] - cur)) < 1e-6) {
-            idx = i;
-            found = true;
-            break;
+    
+    // Handle U32 types (Cycles, Dwell)
+    if (settings_editor_type_ == SettingsEditorValueType::U32) {
+        if (settings_editor_category_ == SettingsCategory::FatigueTest) {
+            if (settings_editor_index_ == 1) {
+                // Cycles: 10, 100, 1000 steps (matches quick settings)
+                static constexpr uint32_t kCycleSteps[] = {10, 100, 1000};
+                static constexpr size_t kCycleCount = sizeof(kCycleSteps) / sizeof(kCycleSteps[0]);
+                
+                size_t idx = 0;
+                for (size_t i = 0; i < kCycleCount; ++i) {
+                    if (kCycleSteps[i] == settings_editor_u32_step_) {
+                        idx = i;
+                        break;
+                    }
+                }
+                idx = (idx + 1) % kCycleCount;
+                settings_editor_u32_step_ = kCycleSteps[idx];
+            } else if (settings_editor_index_ == 4) {
+                // Dwell: 1, 2, 10 steps (in 0.5s units, so 0.5s, 1s, 5s increments)
+                static constexpr uint32_t kDwellSteps[] = {1, 2, 10};
+                static constexpr size_t kDwellCount = sizeof(kDwellSteps) / sizeof(kDwellSteps[0]);
+                
+                size_t idx = 0;
+                for (size_t i = 0; i < kDwellCount; ++i) {
+                    if (kDwellSteps[i] == settings_editor_u32_step_) {
+                        idx = i;
+                        break;
+                    }
+                }
+                idx = (idx + 1) % kDwellCount;
+                settings_editor_u32_step_ = kDwellSteps[idx];
+            }
         }
     }
-    if (!found) {
-        idx = 0;
-    }
-    idx = (idx + 1) % count;
-    settings_editor_f32_step_ = steps[idx];
 }
 
 void ui::UiController::handleSettingsPopupInput_(int delta, bool click, uint32_t now_ms) noexcept
@@ -2473,16 +2523,39 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
     // Instructions
     canvas_->setTextSize(1);
     canvas_->setTextColor(colors::text_hint);
-    if (settings_editor_type_ == SettingsEditorValueType::F32) {
+    
+    // Show step info for F32 and U32 (FatigueTest Cycles/Dwell) types
+    const bool show_step = (settings_editor_type_ == SettingsEditorValueType::F32) ||
+        (settings_editor_type_ == SettingsEditorValueType::U32 && 
+         settings_editor_category_ == SettingsCategory::FatigueTest &&
+         (settings_editor_index_ == 1 || settings_editor_index_ == 4));
+    
+    if (show_step) {
         char step_buf[24] = {0};
-        // Show as 0.01 / 0.1 / 1 / 10, without trailing clutter.
-        const float s = settings_editor_f32_step_;
-        if (s >= 1.0f) {
-            snprintf(step_buf, sizeof(step_buf), "Step: %.0f", static_cast<double>(s));
-        } else if (s >= 0.1f) {
-            snprintf(step_buf, sizeof(step_buf), "Step: %.1f", static_cast<double>(s));
-        } else {
-            snprintf(step_buf, sizeof(step_buf), "Step: %.2f", static_cast<double>(s));
+        
+        if (settings_editor_type_ == SettingsEditorValueType::F32) {
+            // Show as 0.01 / 0.1 / 1 / 10, without trailing clutter.
+            const float s = settings_editor_f32_step_;
+            if (s >= 1.0f) {
+                snprintf(step_buf, sizeof(step_buf), "Step: %.0f", static_cast<double>(s));
+            } else if (s >= 0.1f) {
+                snprintf(step_buf, sizeof(step_buf), "Step: %.1f", static_cast<double>(s));
+            } else {
+                snprintf(step_buf, sizeof(step_buf), "Step: %.2f", static_cast<double>(s));
+            }
+        } else if (settings_editor_type_ == SettingsEditorValueType::U32) {
+            if (settings_editor_index_ == 4) {
+                // Dwell: step is in 0.5s units, display as seconds
+                const double step_s = static_cast<double>(settings_editor_u32_step_) * 0.5;
+                if (step_s >= 1.0) {
+                    snprintf(step_buf, sizeof(step_buf), "Step: %.0f s", step_s);
+                } else {
+                    snprintf(step_buf, sizeof(step_buf), "Step: %.1f s", step_s);
+                }
+            } else {
+                // Cycles
+                snprintf(step_buf, sizeof(step_buf), "Step: %" PRIu32, settings_editor_u32_step_);
+            }
         }
 
         drawCenteredText_(cx, 190, "Rotate to change", colors::text_hint, 1);

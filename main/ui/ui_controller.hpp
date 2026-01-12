@@ -150,8 +150,9 @@ private:
     int8_t settings_editor_i8_old_ = 0;
     int8_t settings_editor_i8_new_ = 0;
 
-    // Settings value editor: adjustable step size for float values (changed via long-press)
+    // Settings value editor: adjustable step size (changed via long-press)
     float settings_editor_f32_step_ = 0.1f;
+    uint32_t settings_editor_u32_step_ = 10;
 
     // Settings navigation: remember which main item opened a sub-category.
     int settings_return_main_index_ = 0;
