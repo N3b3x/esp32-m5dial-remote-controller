@@ -1,40 +1,38 @@
-# ESP32 M5Dial Remote Controller
+# M5Dial Remote Controller
 
-Remote controller firmware targeting the **M5Stack Dial** (round 240×240 display + touch + encoder). This project controls a fatigue-test unit over ESP-NOW.
+**A wireless remote control interface for Fatigue Testing Units, built on the M5Stack Dial.**
 
-## Features
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-ESP32-green.svg)
 
-- Round-screen UI with touch + encoder navigation
-- Control pages for fatigue testing (including **Bounds** with Start/Stop/Back)
-- Secure discovery/pairing support at the protocol layer (approved peers stored in NVS)
+## Overview
+This repository contains the firmware for the **M5Dial Remote Controller**. It provides a modern, touch-and-dial interface to wirelessly control and monitor industrial fatigue testing machines. It communicates using the robust ESP-NOW protocol, ensuring low-latency and reliable operation without the need for a WiFi router.
 
-## Build
+**Key Features:**
+*   **Intuitive UI**: Circular menus optimized for the M5Dial's form factor.
+*   **Wireless Control**: Start, Stop, Pause, and Monitor tests remotely.
+*   **Live Dashboard**: Real-time visualization of cycle counts, speed, and status.
+*   **Configuration**: Full control over test parameters (Velocity, Acceleration, Dwell, Bounds).
+*   **Bounds Finding**: Automated wizard to detect machine range of motion.
+*   **Terminal**: On-device log viewer for debugging.
 
-This project uses the repo build tools under `scripts/`.
+## Documentation
+Comprehensive documentation is available in the `docs/` directory:
 
-### Pairing secret
+*   [**System Architecture**](docs/architecture.md): Overview of hardware and software design.
+*   [**User Guide**](docs/user_guide.md): How to operate the device.
+*   [**Communication Protocol**](docs/communication.md): Details of the ESP-NOW packets.
+*   [**UI System**](docs/ui_system.md): Deep dive into the user interface implementation.
+*   [**Development Guide**](docs/development.md): How to build, flash, and modify the code.
 
-Some configurations require a shared pairing secret (HMAC-based pairing). Provide it one of these ways:
+## Quick Start
+1.  **Clone** the repository.
+2.  **Open** in VS Code with PlatformIO.
+3.  **Update Config**: Edit `main/config.hpp` and set `TEST_UNIT_MAC_` to your target machine's MAC address.
+4.  **Build & Flash**: Upload to your M5Stack Dial.
 
-- `--secret <hex>` (recommended for CI/local testing)
-- `ESPNOW_PAIRING_SECRET_HEX` environment variable
-- `secrets.local.yml` (see `secrets.template.yml`)
+## Hardware
+*   [M5Stack Dial](https://docs.m5stack.com/en/core/M5Dial) (ESP32-S3 Smart Rotary Screen)
 
-Example:
-
-```bash
-cd examples/esp32_m5dial_remote_controller
-./scripts/build_app.sh m5dial_remote_controller Release --secret 00000000deadbeefcafebabedeadbeef
-```
-
-## Flash
-
-```bash
-cd examples/esp32_m5dial_remote_controller
-./scripts/flash_app.sh flash_monitor m5dial_remote_controller Release --port /dev/ttyACM0
-```
-
-## Notes
-
-- Pairing UI/workflow may be implemented separately from the protocol support. If pairing is enabled and no peer is approved/configured, control messages may not be sent until a peer is selected/paired.
-
+## License
+This project is open-source. See the LICENSE file for details.
