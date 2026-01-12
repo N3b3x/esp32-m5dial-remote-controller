@@ -532,6 +532,10 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
             const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
             
             if (test_state == fatigue_proto::TestState::Running || test_state == fatigue_proto::TestState::Paused) {
+                // Sync edit_settings_ from machine config before opening Quick Settings
+                if (settings_ != nullptr) {
+                    edit_settings_ = *settings_;
+                }
                 // Open quick settings
                 live_popup_mode_ = LivePopupMode::QuickSettings;
                 quick_settings_index_ = 0;
@@ -1646,29 +1650,38 @@ void ui::UiController::drawRoundedRect_(int16_t x, int16_t y, int16_t w, int16_t
 
 void ui::UiController::drawButton_(const Rect& rect, const char* label, bool focused, bool pressed) noexcept
 {
-    // Button colors
-    uint16_t bg_color = TFT_BLACK;
-    uint16_t border_color = TFT_WHITE;
-    uint16_t text_color = TFT_WHITE;
+    // Modern button with gradient-like effect
+    const int16_t r = rect.h / 3;  // Rounded corners proportional to height
+    
+    uint16_t bg_color = colors::bg_elevated;
+    uint16_t border_color = colors::button_border;
+    uint16_t text_color = colors::text_secondary;
     
     if (pressed) {
-        bg_color = 0x4A69;  // Bright blue
-        border_color = 0x6B9F;
-        text_color = TFT_WHITE;
+        bg_color = colors::accent_blue;
+        border_color = colors::accent_cyan;
+        text_color = colors::text_primary;
     } else if (focused) {
-        bg_color = TFT_DARKGREY;
-        border_color = 0x6B9F;  // Light blue border
+        bg_color = colors::button_active;
+        border_color = colors::accent_blue;
+        text_color = colors::text_primary;
     }
     
-    // Draw button
-    drawRoundedRect_(rect.x, rect.y, rect.w, rect.h, 8, bg_color, true);
-    drawRoundedRect_(rect.x, rect.y, rect.w, rect.h, 8, border_color, false);
+    // Draw filled button with smooth corners
+    canvas_->fillSmoothRoundRect(rect.x, rect.y, rect.w, rect.h, r, bg_color);
     
-    // Draw label centered
+    // Draw border (2px for focused)
+    canvas_->drawRoundRect(rect.x, rect.y, rect.w, rect.h, r, border_color);
+    if (focused) {
+        canvas_->drawRoundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, r - 1, border_color);
+    }
+    
+    // Draw label centered with size 2 font
     canvas_->setTextColor(text_color);
     canvas_->setTextSize(2);
     const int16_t tw = static_cast<int16_t>(canvas_->textWidth(label));
-    canvas_->setCursor(rect.x + (rect.w - tw) / 2, rect.y + (rect.h - 14) / 2);
+    const int16_t th = 14;  // Approx height for size 2
+    canvas_->setCursor(rect.x + (rect.w - tw) / 2, rect.y + (rect.h - th) / 2);
     canvas_->print(label);
 }
 
@@ -1704,6 +1717,38 @@ void ui::UiController::drawModernButton_(int16_t x, int16_t y, int16_t w, int16_
     canvas_->setTextSize(1);
     const int16_t tw = static_cast<int16_t>(canvas_->textWidth(label));
     canvas_->setCursor(x + (w - tw) / 2, y + (h - 8) / 2);
+    canvas_->print(label);
+}
+
+void ui::UiController::drawActionButton_(int16_t x, int16_t y, int16_t w, int16_t h,
+                                         const char* label, bool selected,
+                                         uint16_t accent_color, bool dark_text) noexcept
+{
+    // Beautiful action button with accent color
+    const int16_t r = h / 3;
+    
+    // Dim version of accent for unselected state
+    const uint16_t dim_color = ((accent_color >> 1) & 0x7BEF);  // Halve RGB components
+    
+    uint16_t bg = selected ? accent_color : dim_color;
+    uint16_t border = accent_color;
+    uint16_t text_color = dark_text ? colors::bg_primary : colors::text_primary;
+    
+    // Draw filled button
+    canvas_->fillSmoothRoundRect(x, y, w, h, r, bg);
+    
+    // Draw border (thicker when selected)
+    canvas_->drawRoundRect(x, y, w, h, r, border);
+    if (selected) {
+        canvas_->drawRoundRect(x + 1, y + 1, w - 2, h - 2, r - 1, border);
+    }
+    
+    // Draw label centered with size 2 font
+    canvas_->setTextColor(text_color);
+    canvas_->setTextSize(2);
+    const int16_t tw = static_cast<int16_t>(canvas_->textWidth(label));
+    const int16_t th = 14;
+    canvas_->setCursor(x + (w - tw) / 2, y + (h - th) / 2);
     canvas_->print(label);
 }
 
@@ -2694,8 +2739,8 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
     if (show_bounds) {
         char buf1[32];
         char buf2[32];
-        snprintf(buf1, sizeof(buf1), "MIN %.1f\xB0", static_cast<double>(min_deg));
-        snprintf(buf2, sizeof(buf2), "MAX %.1f\xB0", static_cast<double>(max_deg));
+        snprintf(buf1, sizeof(buf1), "MIN %.2f deg", static_cast<double>(min_deg));
+        snprintf(buf2, sizeof(buf2), "MAX %.2f deg", static_cast<double>(max_deg));
 
         // Put the numbers on a dark pill so they stay readable even when the
         // blue window highlight passes behind them.
@@ -2912,19 +2957,10 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
         const int16_t btn_x2 = cx + 10;
         
         const Rect cancel_btn{btn_x1, btn_y1, btn_w, btn_h};
-        const Rect start_btn{btn_x2, btn_y1, btn_w, btn_h};
         
         drawButton_(cancel_btn, "Cancel", live_popup_selection_ == 0, false);
-        
-        // Green start button
-        const bool start_sel = (live_popup_selection_ == 1);
-        drawRoundedRect_(start_btn.x, start_btn.y, start_btn.w, start_btn.h, 6, 
-                         start_sel ? 0x07E0 : 0x0400, true);
-        drawRoundedRect_(start_btn.x, start_btn.y, start_btn.w, start_btn.h, 6, 0x07E0, false);
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->setCursor(start_btn.x + 22, start_btn.y + 12);
-        canvas_->print("START");
+        drawActionButton_(btn_x2, btn_y1, btn_w, btn_h, "Start", 
+                         live_popup_selection_ == 1, colors::accent_green, false);
         
     } else if (live_popup_mode_ == LivePopupMode::RunningActions) {
         // Three buttons: Back / Pause / Stop
@@ -2934,29 +2970,13 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
         const int16_t btn_x2 = btn_x1 + btn_w + btn_spacing;
         
         const Rect back_btn{btn_x1, btn_y1, btn_w, btn_h};
-        const Rect pause_btn{btn_x2, btn_y1, btn_w, btn_h};
-        const Rect stop_btn{static_cast<int16_t>(cx - btn_w/2), btn_y2, btn_w, btn_h};
+        const int16_t stop_x = cx - btn_w / 2;
         
         drawButton_(back_btn, "Back", live_popup_selection_ == 0, false);
-        
-        // Yellow pause
-        const bool pause_sel = (live_popup_selection_ == 1);
-        drawRoundedRect_(pause_btn.x, pause_btn.y, pause_btn.w, pause_btn.h, 6,
-                         pause_sel ? 0xFFE0 : 0x4200, true);
-        drawRoundedRect_(pause_btn.x, pause_btn.y, pause_btn.w, pause_btn.h, 6, 0xFFE0, false);
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(TFT_BLACK);
-        canvas_->setCursor(pause_btn.x + 20, pause_btn.y + 12);
-        canvas_->print("PAUSE");
-        
-        // Red stop
-        const bool stop_sel = (live_popup_selection_ == 2);
-        drawRoundedRect_(stop_btn.x, stop_btn.y, stop_btn.w, stop_btn.h, 6,
-                         stop_sel ? 0xF800 : 0x4000, true);
-        drawRoundedRect_(stop_btn.x, stop_btn.y, stop_btn.w, stop_btn.h, 6, 0xF800, false);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->setCursor(stop_btn.x + 24, stop_btn.y + 12);
-        canvas_->print("STOP");
+        drawActionButton_(btn_x2, btn_y1, btn_w, btn_h, "Pause",
+                         live_popup_selection_ == 1, colors::accent_yellow, true);
+        drawActionButton_(stop_x, btn_y2, btn_w, btn_h, "Stop",
+                         live_popup_selection_ == 2, colors::accent_red, false);
         
     } else if (live_popup_mode_ == LivePopupMode::PausedActions) {
         // Three buttons: Back / Resume / Stop
@@ -2966,29 +2986,13 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
         const int16_t btn_x2 = btn_x1 + btn_w + btn_spacing;
         
         const Rect back_btn{btn_x1, btn_y1, btn_w, btn_h};
-        const Rect resume_btn{btn_x2, btn_y1, btn_w, btn_h};
-        const Rect stop_btn{static_cast<int16_t>(cx - btn_w/2), btn_y2, btn_w, btn_h};
+        const int16_t stop_x = cx - btn_w / 2;
         
         drawButton_(back_btn, "Back", live_popup_selection_ == 0, false);
-        
-        // Green resume
-        const bool resume_sel = (live_popup_selection_ == 1);
-        drawRoundedRect_(resume_btn.x, resume_btn.y, resume_btn.w, resume_btn.h, 6,
-                         resume_sel ? 0x07E0 : 0x0400, true);
-        drawRoundedRect_(resume_btn.x, resume_btn.y, resume_btn.w, resume_btn.h, 6, 0x07E0, false);
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->setCursor(resume_btn.x + 16, resume_btn.y + 12);
-        canvas_->print("RESUME");
-        
-        // Red stop
-        const bool stop_sel = (live_popup_selection_ == 2);
-        drawRoundedRect_(stop_btn.x, stop_btn.y, stop_btn.w, stop_btn.h, 6,
-                         stop_sel ? 0xF800 : 0x4000, true);
-        drawRoundedRect_(stop_btn.x, stop_btn.y, stop_btn.w, stop_btn.h, 6, 0xF800, false);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->setCursor(stop_btn.x + 24, stop_btn.y + 12);
-        canvas_->print("STOP");
+        drawActionButton_(btn_x2, btn_y1, btn_w, btn_h, "Resume",
+                         live_popup_selection_ == 1, colors::accent_green, false);
+        drawActionButton_(stop_x, btn_y2, btn_w, btn_h, "Stop",
+                         live_popup_selection_ == 2, colors::accent_red, false);
     }
 }
 
@@ -3253,7 +3257,7 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
     if (quick_settings_confirm_popup_) {
         // Popup overlay
         const int16_t pw = 160;
-        const int16_t ph = 80;
+        const int16_t ph = 90;
         const int16_t px = cx - pw / 2;
         const int16_t py = cy - ph / 2;
         
@@ -3261,35 +3265,27 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
         canvas_->drawRoundRect(px, py, pw, ph, 12, colors::accent_blue);
         
         // Title
-        canvas_->setTextSize(1);
+        canvas_->setTextSize(2);
         canvas_->setTextColor(colors::text_primary);
-        const char* popup_title = "Apply change?";
+        const char* popup_title = "Apply?";
         const int16_t ptw = static_cast<int16_t>(canvas_->textWidth(popup_title));
         canvas_->setCursor(cx - ptw / 2, py + 12);
         canvas_->print(popup_title);
         
         // Buttons: Keep / Revert
-        const int16_t btn_w = 60;
-        const int16_t btn_h = 26;
-        const int16_t btn_y = py + ph - btn_h - 10;
-        const int16_t keep_x = px + 15;
-        const int16_t revert_x = px + pw - btn_w - 15;
+        const int16_t btn_w = 80;
+        const int16_t btn_h = 36;
+        const int16_t btn_y = py + ph - btn_h - 12;
+        const int16_t keep_x = px + 12;
+        const int16_t revert_x = px + pw - btn_w - 12;
         
-        // Keep button
-        const bool keep_sel = (quick_settings_confirm_sel_ == 0);
-        canvas_->fillSmoothRoundRect(keep_x, btn_y, btn_w, btn_h, 6,
-            keep_sel ? colors::accent_green : colors::bg_primary);
-        canvas_->setTextColor(keep_sel ? colors::bg_primary : colors::text_secondary);
-        canvas_->setCursor(keep_x + 12, btn_y + 8);
-        canvas_->print("Keep");
+        // Keep button (green accent)
+        drawActionButton_(keep_x, btn_y, btn_w, btn_h, "Keep",
+                         quick_settings_confirm_sel_ == 0, colors::accent_green, false);
         
-        // Revert button
-        const bool revert_sel = (quick_settings_confirm_sel_ == 1);
-        canvas_->fillSmoothRoundRect(revert_x, btn_y, btn_w, btn_h, 6,
-            revert_sel ? colors::state_error : colors::bg_primary);
-        canvas_->setTextColor(revert_sel ? colors::bg_primary : colors::text_secondary);
-        canvas_->setCursor(revert_x + 6, btn_y + 8);
-        canvas_->print("Revert");
+        // Revert button (red accent)
+        drawActionButton_(revert_x, btn_y, btn_w, btn_h, "Revert",
+                         quick_settings_confirm_sel_ == 1, colors::accent_red, false);
     }
 }
 

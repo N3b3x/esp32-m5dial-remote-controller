@@ -322,6 +322,8 @@ private:
                           float progress, uint16_t fg_color, uint16_t bg_color) noexcept;
     void drawModernButton_(int16_t x, int16_t y, int16_t w, int16_t h,
                            const char* label, bool selected, bool pressed, uint16_t accent) noexcept;
+    void drawActionButton_(int16_t x, int16_t y, int16_t w, int16_t h,
+                           const char* label, bool selected, uint16_t accent_color, bool dark_text) noexcept;
     void drawCenteredText_(int16_t cx, int16_t y, const char* text, uint16_t color, uint8_t size) noexcept;
     
     // Legacy helpers (kept for compatibility)
