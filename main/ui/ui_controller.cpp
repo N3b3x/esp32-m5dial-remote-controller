@@ -79,58 +79,120 @@ void ui::UiController::Init() noexcept
     M5.Display.setBrightness(0);
     M5.Display.fillScreen(TFT_BLACK);
 
-    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-    boot_start_ms_ = now_ms;
-    
-    // Draw boot screen to canvas and push
+    // Modern Boot Animation
     if (canvas_ != nullptr) {
-        canvas_->fillScreen(TFT_BLACK);
-        
-        // ConMed™ logo - large centered text
-        canvas_->setTextSize(3);
-        canvas_->setTextColor(TFT_WHITE);
-        canvas_->drawCenterString("ConMed", CENTER_X_, CENTER_Y_ - 30);
-        
-        // TM superscript
-        canvas_->setTextSize(1);
-        canvas_->drawString("TM", CENTER_X_ + 58, CENTER_Y_ - 45);
-        
-        // Subtitle
-        canvas_->setTextSize(1);
-        canvas_->setTextColor(0xAD55);  // Light gray
-        canvas_->drawCenterString("Fatigue Test Unit", CENTER_X_, CENTER_Y_ + 20);
-        
-        canvas_->pushSprite(0, 0);
-    }
-    
-    // Fade in brightness
-    for (int i = 0; i < 128; i++) {
-        M5.Display.setBrightness(i);
-        vTaskDelay(pdMS_TO_TICKS(4));
-    }
-    vTaskDelay(pdMS_TO_TICKS(800));  // Hold boot screen
+        // Phase 1: Fade In (0 -> 128)
+        const int kSplashBrightness = 128;
+        const int kFadeInSteps = 32;
+        for (int i = 0; i <= kFadeInSteps; i++) {
+            uint32_t t = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            float p = (float)i / (float)kFadeInSteps;
+            // Progress 0.0 -> 0.4
+            drawBootScreen_(t, p * 0.4f);
+            int b = (int)(p * kSplashBrightness);
+            M5.Display.setBrightness(b);
+            vTaskDelay(pdMS_TO_TICKS(15));
+        }
 
-    // Apply saved brightness setting
+        // Phase 2: Hold / Spin
+        const uint32_t kHoldDurationMs = 1200;
+        uint32_t hold_start = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        while ((static_cast<uint32_t>(esp_timer_get_time() / 1000) - hold_start) < kHoldDurationMs) {
+            uint32_t t = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            float elapsed = (float)(t - hold_start) / (float)kHoldDurationMs;
+            // Progress 0.4 -> 1.0
+            float p = 0.4f + (elapsed * 0.6f);
+            drawBootScreen_(t, p);
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        // Phase 3: Fade Out (Option A)
+        const int kFadeOutSteps = 20;
+        for (int i = 0; i <= kFadeOutSteps; i++) {
+            uint32_t t = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            float p = 1.0f - ((float)i / (float)kFadeOutSteps);
+            int b = (int)(p * kSplashBrightness);
+            drawBootScreen_(t, 1.0f);
+            M5.Display.setBrightness(b);
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        // Ensure black before switch
+        M5.Display.setBrightness(0);
+        M5.Display.fillScreen(TFT_BLACK);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
     if (settings_ != nullptr) {
         M5.Display.setBrightness(settings_->ui.brightness);
     } else {
         M5.Display.setBrightness(128);
     }
 
-    boot_complete_ = true;
-    logf_(now_ms, "Boot: UI init");
-
     // Initialize circular menu
     initCircularMenu_();
 
     // Kick off initial config request (used as the remote controller's status poll).
     (void)espnow::SendConfigRequest(fatigue_proto::DEVICE_ID_FATIGUE_TESTER_);
-    logf_(now_ms, "TX: ConfigRequest dev=%u", fatigue_proto::DEVICE_ID_FATIGUE_TESTER_);
-
-    last_poll_ms_ = now_ms;
 
     dirty_ = true;
     ESP_LOGI(TAG_, "UI initialized");
+}
+
+void ui::UiController::drawBootScreen_(uint32_t now_ms, float progress) noexcept
+{
+    if (canvas_ == nullptr) return;
+    // Background: Deep navy gradient simulation
+    canvas_->fillScreen(0x0005);
+    // Soft glow bloom behind logo (center)
+    canvas_->fillCircle(CENTER_X_, CENTER_Y_ - 30, 70, 0x000A);
+    canvas_->fillCircle(CENTER_X_, CENTER_Y_ - 30, 50, 0x000F);
+    // Progress ring
+    int16_t r = 115;
+    // Track background
+    canvas_->drawArc(CENTER_X_, CENTER_Y_, r, r, 0, 360, 0x1084);
+    // Active arc (blue/cyan)
+    int32_t start_angle = 270;
+    int32_t end_angle = 270 + (int32_t)(progress * 360.0f);
+    canvas_->drawArc(CENTER_X_, CENTER_Y_, r, r, start_angle, end_angle, 0x04FF);
+    // Orbiting dot
+    float rad = (float)end_angle * 0.0174532925f;
+    int16_t dot_x = CENTER_X_ + (int16_t)(cos(rad) * r);
+    int16_t dot_y = CENTER_Y_ + (int16_t)(sin(rad) * r);
+    canvas_->fillCircle(dot_x, dot_y, 4, TFT_WHITE);
+    // Logo Text: "ConMed"
+    canvas_->setTextDatum(textdatum_t::middle_center);
+    canvas_->setTextSize(3);
+    // Shadow
+    canvas_->setTextColor(TFT_BLACK);
+    canvas_->drawString("ConMed", CENTER_X_ + 3, CENTER_Y_ - 30 + 3);
+    // Foreground
+    canvas_->setTextColor(TFT_WHITE);
+    canvas_->drawString("ConMed", CENTER_X_, CENTER_Y_ - 30);
+    // TM badge
+    canvas_->setTextSize(1);
+    canvas_->setTextDatum(textdatum_t::top_left);
+    canvas_->drawString("TM", CENTER_X_ + 58, CENTER_Y_ - 45);
+    // Subtitle Pill
+    int16_t pill_w = 150;
+    int16_t pill_h = 26;
+    int16_t pill_x = CENTER_X_ - pill_w/2;
+    int16_t pill_y = CENTER_Y_ + 10;
+    // Pill bg
+    canvas_->fillRoundRect(pill_x, pill_y, pill_w, pill_h, 13, 0x18E3);
+    // Pill border
+    canvas_->drawRoundRect(pill_x, pill_y, pill_w, pill_h, 13, 0x4A69);
+    canvas_->setTextDatum(textdatum_t::middle_center);
+    canvas_->setTextColor(TFT_WHITE);
+    canvas_->drawString("Fatigue Test Unit", CENTER_X_, pill_y + pill_h/2 + 1);
+    // Status / Percentage
+    char buf[32];
+    int pct = (int)(progress * 100.0f);
+    if (pct > 100) pct = 100;
+    snprintf(buf, sizeof(buf), "Starting... %d%%", pct);
+    canvas_->setTextColor(0x9CD3);
+    canvas_->drawString(buf, CENTER_X_, CENTER_Y_ + 55);
+    canvas_->pushSprite(0, 0);
 }
 
 void ui::UiController::initCircularMenu_() noexcept
@@ -2005,8 +2067,9 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
         canvas_->fillRoundRect(pill_x, pill_y, pill_w, kPillH, kRadius, colors::bg_card);
         canvas_->drawRoundRect(pill_x, pill_y, pill_w, kPillH, kRadius, conn_color);
         canvas_->setTextColor(conn_color);
-        canvas_->setCursor(static_cast<int16_t>(pill_x + kPadX), static_cast<int16_t>(pill_y + 4));
-        canvas_->print(conn_text);
+        canvas_->setTextDatum(textdatum_t::middle_left);
+        canvas_->drawString(conn_text, pill_x + kPadX, pill_y + kPillH / 2);
+        canvas_->setTextDatum(textdatum_t::top_left); // restore default
     }
     
     // Draw connection indicator
@@ -2212,21 +2275,25 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
                                    editing ? TFT_WHITE : colors::accent_orange);
         }
         
-        // Label (larger)
+        // Label (vertically centered upper half)
         canvas_->setTextSize(2);
         canvas_->setTextColor(selected ? TFT_WHITE : colors::text_primary);
-        canvas_->setCursor(card_x + 10, item_y - 14);
-        canvas_->print(labels[i]);
-        
-        // Value: prefer larger for readability, but never allow it to overflow the card.
+        canvas_->setTextDatum(textdatum_t::middle_left);
+        // Place label at 1/3 from top of card
+        int16_t label_y = item_y - 8;
+        canvas_->drawString(labels[i], card_x + 14, label_y);
+
+        // Value: vertically centered lower half, never overflow card
         canvas_->setTextColor(selected ? colors::accent_yellow : colors::text_secondary);
         canvas_->setTextSize(2);
         int16_t vw = static_cast<int16_t>(canvas_->textWidth(values[i]));
         if (vw > (card_w - 20)) {
             canvas_->setTextSize(1);
         }
-        canvas_->setCursor(card_x + 10, item_y + 4);
-        canvas_->print(values[i]);
+        // Place value at 2/3 from top of card
+        int16_t value_y = item_y + 10;
+        canvas_->drawString(values[i], card_x + 14, value_y);
+        canvas_->setTextDatum(textdatum_t::top_left); // restore default
         
         // Draw chevron for categories (Main menu items 1-3)
         if (is_category && selected) {
@@ -2518,6 +2585,25 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
         canvas_->setCursor(cx - vw / 2, cy - 22);
         canvas_->print(new_buf);
     }
+
+    // Special hint for SGT
+    if (label != nullptr && strcmp(label, "SGT") == 0) {
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_hint);
+        
+        const char* line1 = "Lower value: more sensitive";
+        const char* line2 = "Higher value: less sensitive";
+        
+        const int16_t w1 = static_cast<int16_t>(canvas_->textWidth(line1));
+        const int16_t w2 = static_cast<int16_t>(canvas_->textWidth(line2));
+        
+        // Draw below the value/unit (approx y=150 area) and above action pills
+        canvas_->setCursor(cx - w1 / 2, 154);
+        canvas_->print(line1);
+        
+        canvas_->setCursor(cx - w2 / 2, 164);
+        canvas_->print(line2);
+    }    
 
     // Instructions - styled pills at bottom (like quick settings)
     canvas_->setTextSize(1);

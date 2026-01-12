@@ -345,10 +345,8 @@ private:
     static constexpr int16_t CENTER_X_ = 120;
     static constexpr int16_t CENTER_Y_ = 120;
     
-    // Boot screen state
-    bool boot_complete_ = false;
-    uint32_t boot_start_ms_ = 0;
-    static constexpr uint32_t BOOT_DURATION_MS_ = 1500;
+    // Boot screen: no persistent state needed
+    void drawBootScreen_(uint32_t now_ms, float progress) noexcept;
 };
 
 } // namespace ui
