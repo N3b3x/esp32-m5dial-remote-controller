@@ -3141,9 +3141,10 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
     
     // Item layout: compact vertical list
     // Items: 0=< Back, 1=VMAX, 2=AMAX, 3=Dwell, 4=Cycles
-    static constexpr int16_t kItemH = 36;
-    static constexpr int16_t kListTop = 50;
-    static constexpr int16_t kListW = 190;
+    // Layout tuned for 240px circular display - items must end by ~200px to leave room for hint
+    static constexpr int16_t kItemH = 30;
+    static constexpr int16_t kListTop = 48;
+    static constexpr int16_t kListW = 180;
     static constexpr int16_t kListX = (240 - kListW) / 2;
     
     const char* labels[kQuickSettingsItemCount_] = {
@@ -3171,8 +3172,7 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
     }
     
     if (quick_settings_editing_ && quick_settings_index_ == 3) {
-        const float dwell_sec = static_cast<float>(quick_editor_u32_new_) * 0.5f;
-        snprintf(values[3], sizeof(values[3]), "%.1f s", static_cast<double>(dwell_sec));
+        snprintf(values[3], sizeof(values[3]), "%.1f s", static_cast<double>(quick_editor_f32_new_));
     } else {
         const float dwell_sec = static_cast<float>(edit_settings_.test_unit.dwell_time_ms) / 1000.0f;
         snprintf(values[3], sizeof(values[3]), "%.1f s", static_cast<double>(dwell_sec));
@@ -3197,45 +3197,49 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
         const bool selected = (quick_settings_index_ == i);
         const bool editing = (quick_settings_editing_ && quick_settings_index_ == i);
         
-        // Background
+        // Background - use smaller rounding for compact items
         if (selected) {
-            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 4, 8, 
+            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 2, 6, 
                 editing ? colors::accent_orange : colors::accent_blue);
         } else {
-            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 4, 8, colors::bg_elevated);
+            canvas_->fillSmoothRoundRect(kListX, y, kListW, kItemH - 2, 6, colors::bg_elevated);
         }
         
-        // Label - larger text for readability
-        canvas_->setTextSize(2);
+        // Label - smaller text size for compact layout
+        canvas_->setTextSize(1);
         canvas_->setTextColor(selected ? colors::bg_primary : colors::text_secondary);
-        canvas_->setCursor(kListX + 8, y + 6);
+        canvas_->setCursor(kListX + 6, y + 8);
         canvas_->print(labels[i]);
         
-        // Value (right-aligned) - keep size 2 for consistency
+        // Value (right-aligned)
         if (i > 0) {
             const int16_t vw = static_cast<int16_t>(canvas_->textWidth(values[i]));
-            canvas_->setCursor(kListX + kListW - vw - 8, y + 6);
+            canvas_->setCursor(kListX + kListW - vw - 6, y + 8);
             canvas_->print(values[i]);
         }
     }
     
-    // Bottom hint - show step info when editing F32
+    // Bottom hint - show step info when editing
     canvas_->setTextSize(1);
     canvas_->setTextColor(colors::text_hint);
     const char* action_hint;
     char hint_buf[48];
     if (quick_settings_editing_) {
         if (quick_editor_type_ == QuickEditorType::F32) {
-            snprintf(hint_buf, sizeof(hint_buf), "Step:%.2f | Hold:step", static_cast<double>(quick_editor_f32_step_));
+            snprintf(hint_buf, sizeof(hint_buf), "Step:%.1f | Hold:step", static_cast<double>(quick_editor_f32_step_));
+            action_hint = hint_buf;
+        } else if (quick_editor_type_ == QuickEditorType::U32) {
+            snprintf(hint_buf, sizeof(hint_buf), "Step:%lu | Hold:step", static_cast<unsigned long>(quick_editor_u32_step_));
             action_hint = hint_buf;
         } else {
             action_hint = "Rotate: adjust";
         }
     } else {
-        action_hint = "Click: edit | Back: return";
+        action_hint = "Click: edit | Back: exit";
     }
     const int16_t ahw = static_cast<int16_t>(canvas_->textWidth(action_hint));
-    canvas_->setCursor(cx - ahw / 2, 232 - 12);
+    // Position hint at y=202 - after last item (48 + 5*30 = 198) with small gap
+    canvas_->setCursor(cx - ahw / 2, 205);
     canvas_->print(action_hint);
     
     // Draw confirmation popup if active
@@ -3372,15 +3376,17 @@ void ui::UiController::beginQuickSettingsEdit_() noexcept
             quick_editor_f32_new_ = quick_editor_f32_old_;
             quick_editor_f32_step_ = 0.1f;  // 0.1 rev/s² steps
             break;
-        case 3:  // Dwell (U32 in half-seconds)
-            quick_editor_type_ = QuickEditorType::U32;
-            quick_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 250u) / 500u;
-            quick_editor_u32_new_ = quick_editor_u32_old_;
+        case 3:  // Dwell (F32 in seconds)
+            quick_editor_type_ = QuickEditorType::F32;
+            quick_editor_f32_old_ = static_cast<float>(edit_settings_.test_unit.dwell_time_ms) / 1000.0f;
+            quick_editor_f32_new_ = quick_editor_f32_old_;
+            quick_editor_f32_step_ = 0.1f;  // 0.1 second steps
             break;
         case 4:  // Cycles (U32)
             quick_editor_type_ = QuickEditorType::U32;
             quick_editor_u32_old_ = edit_settings_.test_unit.cycle_amount;
             quick_editor_u32_new_ = quick_editor_u32_old_;
+            quick_editor_u32_step_ = 10;  // Start with step of 10
             break;
         default:
             quick_settings_editing_ = false;
@@ -3403,8 +3409,7 @@ void ui::UiController::handleQuickSettingsValueEdit_(int delta) noexcept
             break;
         }
         case QuickEditorType::U32: {
-            const int64_t step = (quick_settings_index_ == 4) ? 10 : 1;  // Cycles: step by 10
-            const int64_t next = static_cast<int64_t>(quick_editor_u32_new_) + static_cast<int64_t>(delta) * step;
+            const int64_t next = static_cast<int64_t>(quick_editor_u32_new_) + static_cast<int64_t>(delta) * static_cast<int64_t>(quick_editor_u32_step_);
             quick_editor_u32_new_ = static_cast<uint32_t>(std::max(int64_t{0}, next));
             break;
         }
@@ -3427,39 +3432,39 @@ bool ui::UiController::quickEditorHasChange_() const noexcept
 
 void ui::UiController::cycleQuickSettingsStep_() noexcept
 {
-    if (quick_editor_type_ != QuickEditorType::F32) {
-        return;
+    // Handle F32 types (VMAX, AMAX)
+    if (quick_editor_type_ == QuickEditorType::F32) {
+        // VMAX and AMAX both use 0.1, 1, 10 steps
+        static constexpr float kSteps[] = {0.1f, 1.0f, 10.0f};
+        static constexpr size_t kCount = sizeof(kSteps) / sizeof(kSteps[0]);
+        
+        size_t idx = 0;
+        for (size_t i = 0; i < kCount; ++i) {
+            if (std::fabs(static_cast<double>(kSteps[i] - quick_editor_f32_step_)) < 1e-6) {
+                idx = i;
+                break;
+            }
+        }
+        idx = (idx + 1) % kCount;
+        quick_editor_f32_step_ = kSteps[idx];
     }
-    
-    // Define step options based on which value is being edited
-    if (quick_settings_index_ == 1) {
-        // VMAX: 0.1, 1, 5, 10 RPM steps
-        static constexpr float kVmaxSteps[] = {0.1f, 1.0f, 5.0f, 10.0f};
-        static constexpr size_t kVmaxCount = sizeof(kVmaxSteps) / sizeof(kVmaxSteps[0]);
-        
-        size_t idx = 0;
-        for (size_t i = 0; i < kVmaxCount; ++i) {
-            if (std::fabs(static_cast<double>(kVmaxSteps[i] - quick_editor_f32_step_)) < 1e-6) {
-                idx = i;
-                break;
+    // Handle U32 types (Cycles only - Dwell is now F32)
+    else if (quick_editor_type_ == QuickEditorType::U32) {
+        if (quick_settings_index_ == 4) {
+            // Cycles: 10, 100, 1000 steps
+            static constexpr uint32_t kCycleSteps[] = {10, 100, 1000};
+            static constexpr size_t kCycleCount = sizeof(kCycleSteps) / sizeof(kCycleSteps[0]);
+            
+            size_t idx = 0;
+            for (size_t i = 0; i < kCycleCount; ++i) {
+                if (kCycleSteps[i] == quick_editor_u32_step_) {
+                    idx = i;
+                    break;
+                }
             }
+            idx = (idx + 1) % kCycleCount;
+            quick_editor_u32_step_ = kCycleSteps[idx];
         }
-        idx = (idx + 1) % kVmaxCount;
-        quick_editor_f32_step_ = kVmaxSteps[idx];
-    } else if (quick_settings_index_ == 2) {
-        // AMAX: 0.01, 0.1, 0.5, 1 rev/s² steps
-        static constexpr float kAmaxSteps[] = {0.01f, 0.1f, 0.5f, 1.0f};
-        static constexpr size_t kAmaxCount = sizeof(kAmaxSteps) / sizeof(kAmaxSteps[0]);
-        
-        size_t idx = 0;
-        for (size_t i = 0; i < kAmaxCount; ++i) {
-            if (std::fabs(static_cast<double>(kAmaxSteps[i] - quick_editor_f32_step_)) < 1e-6) {
-                idx = i;
-                break;
-            }
-        }
-        idx = (idx + 1) % kAmaxCount;
-        quick_editor_f32_step_ = kAmaxSteps[idx];
     }
 }
 
@@ -3473,8 +3478,8 @@ void ui::UiController::applyQuickSettingsValue_(uint32_t now_ms) noexcept
         case 2:  // AMAX
             edit_settings_.test_unit.oscillation_amax_rev_s2 = std::max(0.5f, quick_editor_f32_new_);
             break;
-        case 3:  // Dwell (convert half-seconds to ms)
-            edit_settings_.test_unit.dwell_time_ms = quick_editor_u32_new_ * 500u;
+        case 3:  // Dwell (convert seconds to ms)
+            edit_settings_.test_unit.dwell_time_ms = static_cast<uint32_t>(std::max(0.0f, quick_editor_f32_new_) * 1000.0f);
             break;
         case 4:  // Cycles
             edit_settings_.test_unit.cycle_amount = quick_editor_u32_new_;

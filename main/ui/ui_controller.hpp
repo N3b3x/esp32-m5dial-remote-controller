@@ -209,6 +209,7 @@ private:
     QuickEditorType quick_editor_type_ = QuickEditorType::None;
     uint32_t quick_editor_u32_old_ = 0;
     uint32_t quick_editor_u32_new_ = 0;
+    uint32_t quick_editor_u32_step_ = 1;
     float quick_editor_f32_old_ = 0.0f;
     float quick_editor_f32_new_ = 0.0f;
     float quick_editor_f32_step_ = 1.0f;
