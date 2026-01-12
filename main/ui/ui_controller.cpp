@@ -1818,7 +1818,7 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
     const int16_t cy = menu_config_.center_y;
     canvas_->drawCircle(cx, cy, 119, 0x2104);  // Subtle ring at edge
 
-    // Connection status pill (centered, above the Live Counter menu icon).
+    // Connection status pill (centered, below the Settings menu icon).
     {
         const char* conn_text = "DISCONNECTED";
         uint16_t conn_color = colors::accent_red;
@@ -1836,15 +1836,17 @@ void ui::UiController::drawCircularLanding_(uint32_t now_ms) noexcept
                 break;
         }
 
-        constexpr int kLiveIndex = 2; // kMenuItems_[2] = Live Counter
-        const Point2D live_pos = menu_selector_.getIconPosition(kLiveIndex);
-        const int16_t live_y = static_cast<int16_t>(live_pos.y);
-
         constexpr int16_t kPillH = 16;
         constexpr int16_t kPadX = 8;
         constexpr int16_t kRadius = 8;
-        constexpr int16_t kGap = 6;
-        const int16_t pill_center_y = static_cast<int16_t>(live_y - menu_config_.icon_bg_radius - kGap - (kPillH / 2));
+        // Extra spacing so the animated selector dot doesn't pass over the pill
+        // when the carousel is near the Settings icon.
+        constexpr int16_t kGap = 14;
+
+        constexpr int kSettingsIndex = 0; // kMenuItems_[0] = Settings
+        const Point2D settings_pos = menu_selector_.getIconPosition(kSettingsIndex);
+        const int16_t settings_y = static_cast<int16_t>(settings_pos.y);
+        const int16_t pill_center_y = static_cast<int16_t>(settings_y + menu_config_.icon_bg_radius + kGap + (kPillH / 2));
 
         canvas_->setTextSize(1);
         const int16_t tw = static_cast<int16_t>(canvas_->textWidth(conn_text));
