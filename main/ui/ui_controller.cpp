@@ -2520,9 +2520,8 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
         canvas_->print(new_buf);
     }
 
-    // Instructions
+    // Instructions - styled pill at bottom (like quick settings)
     canvas_->setTextSize(1);
-    canvas_->setTextColor(colors::text_hint);
     
     // Show step info for F32 and U32 (FatigueTest Cycles/Dwell) types
     const bool show_step = (settings_editor_type_ == SettingsEditorValueType::F32) ||
@@ -2530,40 +2529,47 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
          settings_editor_category_ == SettingsCategory::FatigueTest &&
          (settings_editor_index_ == 1 || settings_editor_index_ == 4));
     
+    char hint_buf[48] = {0};
     if (show_step) {
-        char step_buf[24] = {0};
-        
         if (settings_editor_type_ == SettingsEditorValueType::F32) {
-            // Show as 0.01 / 0.1 / 1 / 10, without trailing clutter.
             const float s = settings_editor_f32_step_;
             if (s >= 1.0f) {
-                snprintf(step_buf, sizeof(step_buf), "Step: %.0f", static_cast<double>(s));
+                snprintf(hint_buf, sizeof(hint_buf), "Step:%.0f | Hold:step", static_cast<double>(s));
             } else if (s >= 0.1f) {
-                snprintf(step_buf, sizeof(step_buf), "Step: %.1f", static_cast<double>(s));
+                snprintf(hint_buf, sizeof(hint_buf), "Step:%.1f | Hold:step", static_cast<double>(s));
             } else {
-                snprintf(step_buf, sizeof(step_buf), "Step: %.2f", static_cast<double>(s));
+                snprintf(hint_buf, sizeof(hint_buf), "Step:%.2f | Hold:step", static_cast<double>(s));
             }
         } else if (settings_editor_type_ == SettingsEditorValueType::U32) {
             if (settings_editor_index_ == 4) {
                 // Dwell: step is in 0.5s units, display as seconds
                 const double step_s = static_cast<double>(settings_editor_u32_step_) * 0.5;
                 if (step_s >= 1.0) {
-                    snprintf(step_buf, sizeof(step_buf), "Step: %.0f s", step_s);
+                    snprintf(hint_buf, sizeof(hint_buf), "Step:%.0fs | Hold:step", step_s);
                 } else {
-                    snprintf(step_buf, sizeof(step_buf), "Step: %.1f s", step_s);
+                    snprintf(hint_buf, sizeof(hint_buf), "Step:%.1fs | Hold:step", step_s);
                 }
             } else {
                 // Cycles
-                snprintf(step_buf, sizeof(step_buf), "Step: %" PRIu32, settings_editor_u32_step_);
+                snprintf(hint_buf, sizeof(hint_buf), "Step:%" PRIu32 " | Hold:step", settings_editor_u32_step_);
             }
         }
-
-        drawCenteredText_(cx, 190, "Rotate to change", colors::text_hint, 1);
-        drawCenteredText_(cx, 204, step_buf, colors::text_hint, 1);
-        drawCenteredText_(cx, 218, "Long press to change step", colors::text_hint, 1);
     } else {
-        drawCenteredText_(cx, 210, "Rotate to change", colors::text_hint, 1);
+        snprintf(hint_buf, sizeof(hint_buf), "Rotate to change");
     }
+    
+    // Draw pill background with border
+    const int16_t ahw = static_cast<int16_t>(canvas_->textWidth(hint_buf));
+    const int16_t pill_w = ahw + 16;
+    const int16_t pill_h = 18;
+    const int16_t pill_x = cx - pill_w / 2;
+    const int16_t pill_y = 205;
+    canvas_->fillSmoothRoundRect(pill_x, pill_y, pill_w, pill_h, 9, colors::bg_elevated);
+    canvas_->drawRoundRect(pill_x, pill_y, pill_w, pill_h, 9, colors::text_hint);
+    // Draw text centered in pill
+    canvas_->setTextColor(colors::text_secondary);
+    canvas_->setCursor(cx - ahw / 2, pill_y + 4);
+    canvas_->print(hint_buf);
 }
 
 void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
