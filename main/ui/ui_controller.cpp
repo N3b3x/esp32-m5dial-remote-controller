@@ -1248,8 +1248,8 @@ void ui::UiController::applySettingsEditorValue_() noexcept
                     edit_settings_.test_unit.cycle_amount = settings_editor_u32_new_;
                     settings_dirty_ = true;
                 } else if (settings_editor_index_ == 4) {
-                    // Dwell time (edited in 0.5s increments, stored as ms) - index 4 in new layout
-                    edit_settings_.test_unit.dwell_time_ms = settings_editor_u32_new_ * 500u;
+                    // Dwell time (edited in 0.1s increments, stored as ms) - index 4 in new layout
+                    edit_settings_.test_unit.dwell_time_ms = settings_editor_u32_new_ * 100u;
                     settings_dirty_ = true;
                 }
             } else if (settings_editor_type_ == SettingsEditorValueType::F32) {
@@ -1340,12 +1340,12 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 settings_editor_f32_new_ = settings_editor_f32_old_;
                 initSettingsEditorStep_();
             } else if (settings_index_ == 4) {
-                // Dwell (edited in 0.5s increments, stored as ms)
+                // Dwell (edited in 0.1s increments, stored as ms)
                 settings_editor_type_ = SettingsEditorValueType::U32;
-                // Represent dwell in half-seconds to allow 0.5s encoder steps.
-                settings_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 250u) / 500u;
+                // Represent dwell in tenths of a second (0.1s units)
+                settings_editor_u32_old_ = (edit_settings_.test_unit.dwell_time_ms + 50u) / 100u;
                 settings_editor_u32_new_ = settings_editor_u32_old_;
-                settings_editor_u32_step_ = 1;  // Start with 0.5s increments
+                settings_editor_u32_step_ = 1;  // Start with 0.1s increments
             }
             break;
 
@@ -1534,10 +1534,9 @@ void ui::UiController::cycleSettingsEditorStep_() noexcept
                 idx = (idx + 1) % kCycleCount;
                 settings_editor_u32_step_ = kCycleSteps[idx];
             } else if (settings_editor_index_ == 4) {
-                // Dwell: 1, 2, 10 steps (in 0.5s units, so 0.5s, 1s, 5s increments)
-                static constexpr uint32_t kDwellSteps[] = {1, 2, 10};
+                // Dwell: 1, 10, 100 steps (in 0.1s units, so 0.1s, 1s, 10s increments)
+                static constexpr uint32_t kDwellSteps[] = {1, 10, 100};
                 static constexpr size_t kDwellCount = sizeof(kDwellSteps) / sizeof(kDwellSteps[0]);
-                
                 size_t idx = 0;
                 for (size_t i = 0; i < kDwellCount; ++i) {
                     if (kDwellSteps[i] == settings_editor_u32_step_) {
@@ -2413,9 +2412,9 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
     switch (settings_editor_type_) {
         case SettingsEditorValueType::U32:
             if (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 4) {
-                // Dwell: editor stores half-seconds; display as seconds with 0.5s resolution.
-                const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.5;
-                const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.5;
+                // Dwell: editor stores tenths of a second; display as seconds with 0.1s resolution.
+                const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.1;
+                const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.1;
                 snprintf(old_buf, sizeof(old_buf), "Old: %.1f %s", old_s, unit);
                 snprintf(new_buf, sizeof(new_buf), "%.1f %s", new_s, unit);
             } else if (has_unit) {
@@ -2543,8 +2542,8 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
             }
         } else if (settings_editor_type_ == SettingsEditorValueType::U32) {
             if (settings_editor_index_ == 4) {
-                // Dwell: step is in 0.5s units, display as seconds
-                const double step_s = static_cast<double>(settings_editor_u32_step_) * 0.5;
+                // Dwell: step is in 0.1s units, display as seconds
+                const double step_s = static_cast<double>(settings_editor_u32_step_) * 0.1;
                 if (step_s >= 1.0) {
                     snprintf(step_hint_buf, sizeof(step_hint_buf), "Step:%.0fs | Hold:step", step_s);
                 } else {
@@ -2639,8 +2638,8 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
         switch (settings_editor_type_) {
             case SettingsEditorValueType::U32:
                 if (settings_editor_category_ == SettingsCategory::FatigueTest && settings_editor_index_ == 4) {
-                    const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.5;
-                    const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.5;
+                    const double old_s = static_cast<double>(settings_editor_u32_old_) * 0.1;
+                    const double new_s = static_cast<double>(settings_editor_u32_new_) * 0.1;
                     snprintf(old_line, sizeof(old_line), "Old: %.1f %s", old_s, unit);
                     snprintf(new_line, sizeof(new_line), "New: %.1f %s", new_s, unit);
                 } else if (has_unit) {
