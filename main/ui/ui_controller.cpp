@@ -3256,7 +3256,7 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
     // Draw confirmation popup if active
     if (quick_settings_confirm_popup_) {
         // Popup overlay
-        const int16_t pw = 160;
+        const int16_t pw = 180;
         const int16_t ph = 90;
         const int16_t px = cx - pw / 2;
         const int16_t py = cy - ph / 2;
@@ -3273,11 +3273,13 @@ void ui::UiController::drawQuickSettings_(uint32_t now_ms) noexcept
         canvas_->print(popup_title);
         
         // Buttons: Keep / Revert
-        const int16_t btn_w = 80;
-        const int16_t btn_h = 36;
+        const int16_t btn_w = 70;
+        const int16_t btn_h = 32;
         const int16_t btn_y = py + ph - btn_h - 12;
-        const int16_t keep_x = px + 12;
-        const int16_t revert_x = px + pw - btn_w - 12;
+        const int16_t btn_spacing = 10;
+        const int16_t total_btn_w = btn_w * 2 + btn_spacing;
+        const int16_t keep_x = cx - total_btn_w / 2;
+        const int16_t revert_x = keep_x + btn_w + btn_spacing;
         
         // Keep button (green accent)
         drawActionButton_(keep_x, btn_y, btn_w, btn_h, "Keep",
