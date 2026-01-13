@@ -1825,9 +1825,10 @@ void ui::UiController::drawModernButton_(int16_t x, int16_t y, int16_t w, int16_
     canvas_->drawRoundRect(x, y, w, h, h/4, border);
     
     canvas_->setTextColor(colors::text_primary);
-    canvas_->setTextSize(1);
+    canvas_->setTextSize(2); // Increased text size for better visibility
     const int16_t tw = static_cast<int16_t>(canvas_->textWidth(label));
-    canvas_->setCursor(x + (w - tw) / 2, y + (h - 8) / 2);
+    const int16_t th = 14; // Approximate height for text size 2
+    canvas_->setCursor(x + (w - tw) / 2, y + (h - th) / 2);
     canvas_->print(label);
 }
 
@@ -2942,9 +2943,17 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
     }
 
     // === BOTTOM CONTROLS (Back + Start/Stop) ===
-    // Slightly higher to avoid bottom-edge clipping on the round display.
-    const Rect back_btn{ 18, 186, 64, 30 };
-    const Rect action_btn{ 90, 186, 132, 30 };
+    // Adjusted to fit within 240px width, with spacing
+    constexpr int16_t btn_y = 186;
+    constexpr int16_t btn_h = 30;
+    constexpr int16_t btn_gap = 8;
+    constexpr int16_t btn_w_total = 204; // total width for both buttons and gap
+    constexpr int16_t back_btn_w = 80;
+    constexpr int16_t action_btn_w = 116;
+    const int16_t back_btn_x = (240 - btn_w_total) / 2;
+    const int16_t action_btn_x = back_btn_x + back_btn_w + btn_gap;
+    const Rect back_btn{ back_btn_x, btn_y, back_btn_w, btn_h };
+    const Rect action_btn{ action_btn_x, btn_y, action_btn_w, btn_h };
 
     const char* action_label = "Start";
     if (bounds_state_ == BoundsState::Running) action_label = "Stop";
