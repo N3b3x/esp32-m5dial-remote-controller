@@ -319,13 +319,13 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
 
                     // If motor power has been disabled (or bounds expired), previously found bounds
                     // must not be shown as valid. Clear cached bounds results so the UI forces a re-find.
-                    if (status.bounds_valid == 0 && bounds_have_result_) {
-                        boundsResetResult_();
-                        if (bounds_state_ == BoundsState::Complete) {
+                    if (status.bounds_valid == 0) {
+                        if (bounds_have_result_ || bounds_state_ == BoundsState::Complete) {
+                            boundsResetResult_();
                             bounds_state_ = BoundsState::Idle;
                             bounds_state_since_ms_ = now_ms;
+                            logf_(now_ms, "UI: cleared cached bounds (invalidated)");
                         }
-                        logf_(now_ms, "UI: cleared cached bounds (invalidated)");
                     }
 
                     // If bounds UI is running, allow a state transition on real status.
@@ -479,7 +479,10 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
         have_remote_config_ = false;
         last_status_ = {};
         last_remote_config_ = {};
-        logf_(now_ms, "Connection timeout - cleared stale status data");
+        boundsResetResult_();
+        bounds_state_ = BoundsState::Idle;
+        bounds_state_since_ms_ = now_ms;
+        logf_(now_ms, "Connection timeout - cleared stale status data and reset bounds state");
         dirty_ = true;
     }
 }
