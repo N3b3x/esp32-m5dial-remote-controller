@@ -17,42 +17,51 @@ namespace theme {
 // ============================================================================
 // Color Palette - Modern dark theme with accent colors
 // ============================================================================
+/**
+ * @brief Color palette namespace
+ */
 namespace colors {
     // Base colors
-    constexpr uint16_t bg_primary     = 0x0000;  // Pure black
-    constexpr uint16_t bg_secondary   = 0x18C3;  // Dark gray #1a1a2e
-    constexpr uint16_t bg_card        = 0x2104;  // Card background #212135
-    constexpr uint16_t bg_elevated    = 0x3186;  // Elevated surface
+    constexpr uint16_t bg_primary     = 0x0000;  ///< Pure black background
+    constexpr uint16_t bg_secondary   = 0x18C3;  ///< Dark gray background (#1a1a2e)
+    constexpr uint16_t bg_card        = 0x2104;  ///< Card background (#212135)
+    constexpr uint16_t bg_elevated    = 0x3186;  ///< Elevated surface background
     
     // Text colors
-    constexpr uint16_t text_primary   = 0xFFFF;  // White
-    constexpr uint16_t text_secondary = 0xB596;  // Light gray
-    constexpr uint16_t text_muted     = 0x6B6D;  // Muted gray
-    constexpr uint16_t text_hint      = 0x4228;  // Hint text
+    constexpr uint16_t text_primary   = 0xFFFF;  ///< Primary text (white)
+    constexpr uint16_t text_secondary = 0xB596;  ///< Secondary text (light gray)
+    constexpr uint16_t text_muted     = 0x6B6D;  ///< Muted text (gray)
+    constexpr uint16_t text_hint      = 0x4228;  ///< Hint text (dark gray)
     
     // Accent colors
-    constexpr uint16_t accent_blue    = 0x2D7F;  // Vibrant blue
-    constexpr uint16_t accent_green   = 0x2E89;  // Success green
-    constexpr uint16_t accent_red     = 0xF166;  // Error red
-    constexpr uint16_t accent_yellow  = 0xFE66;  // Warning yellow
-    constexpr uint16_t accent_cyan    = 0x2FFF;  // Info cyan
-    constexpr uint16_t accent_orange  = 0xFC60;  // Orange accent
+    constexpr uint16_t accent_blue    = 0x2D7F;  ///< Vibrant blue accent
+    constexpr uint16_t accent_green   = 0x2E89;  ///< Success green accent
+    constexpr uint16_t accent_red     = 0xF166;  ///< Error red accent
+    constexpr uint16_t accent_yellow  = 0xFE66;  ///< Warning yellow accent
+    constexpr uint16_t accent_cyan    = 0x2FFF;  ///< Info cyan accent
+    constexpr uint16_t accent_orange  = 0xFC60;  ///< Orange accent
     
     // State colors
-    constexpr uint16_t state_idle     = 0x4228;  // Idle gray
-    constexpr uint16_t state_running  = 0x2E89;  // Running green
-    constexpr uint16_t state_paused   = 0xFE66;  // Paused yellow
-    constexpr uint16_t state_error    = 0xF166;  // Error red
-    constexpr uint16_t state_complete = 0x2FFF;  // Complete cyan
+    constexpr uint16_t state_idle     = 0x4228;  ///< Idle state (gray)
+    constexpr uint16_t state_running  = 0x2E89;  ///< Running state (green)
+    constexpr uint16_t state_paused   = 0xFE66;  ///< Paused state (yellow)
+    constexpr uint16_t state_error    = 0xF166;  ///< Error state (red)
+    constexpr uint16_t state_complete = 0x2FFF;  ///< Complete state (cyan)
     
     // UI element colors
-    constexpr uint16_t button_bg      = 0x2104;  // Button background
-    constexpr uint16_t button_border  = 0x4A69;  // Button border
-    constexpr uint16_t button_active  = 0x3186;  // Active button
-    constexpr uint16_t progress_bg    = 0x2104;  // Progress bar background
-    constexpr uint16_t selector       = 0xF7BE;  // Selector (cream/off-white)
+    constexpr uint16_t button_bg      = 0x2104;  ///< Button background
+    constexpr uint16_t button_border  = 0x4A69;  ///< Button border
+    constexpr uint16_t button_active  = 0x3186;  ///< Active button background
+    constexpr uint16_t progress_bg    = 0x2104;  ///< Progress bar background
+    constexpr uint16_t selector       = 0xF7BE;  ///< Selector color (cream/off-white)
     
-    // Convert 8-bit RGB to RGB565
+    /**
+     * @brief Convert 8-bit RGB to RGB565 format
+     * @param r Red component (0-255)
+     * @param g Green component (0-255)
+     * @param b Blue component (0-255)
+     * @return RGB565 color value
+     */
     constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
         return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
     }
@@ -61,11 +70,11 @@ namespace colors {
 // ============================================================================
 // Constants
 // ============================================================================
-constexpr int16_t DISPLAY_W = 240;
-constexpr int16_t DISPLAY_H = 240;
-constexpr int16_t CENTER_X = DISPLAY_W / 2;
-constexpr int16_t CENTER_Y = DISPLAY_H / 2;
-constexpr int16_t DISPLAY_R = 120;  // Radius of circular display
+constexpr int16_t DISPLAY_W = 240;   ///< Display width in pixels
+constexpr int16_t DISPLAY_H = 240;   ///< Display height in pixels
+constexpr int16_t CENTER_X = DISPLAY_W / 2;  ///< Display center X coordinate
+constexpr int16_t CENTER_Y = DISPLAY_H / 2;  ///< Display center Y coordinate
+constexpr int16_t DISPLAY_R = 120;  ///< Radius of circular display
 
 // ============================================================================
 // Drawing Helpers
