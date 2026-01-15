@@ -1,3 +1,8 @@
+/**
+ * @file settings.cpp
+ * @brief Implementation of persistent settings storage using NVS with CRC32 validation
+ */
+
 #include "settings.hpp"
 
 #include "esp_log.h"
@@ -8,9 +13,15 @@
 
 static const char* TAG_ = "settings";
 
-static constexpr const char* NVS_NAMESPACE_ = "m5dial_rc";
-static constexpr const char* NVS_KEY_BLOB_ = "settings";
+static constexpr const char* NVS_NAMESPACE_ = "m5dial_rc";  ///< NVS namespace for settings
+static constexpr const char* NVS_KEY_BLOB_ = "settings";    ///< NVS key for settings blob
 
+/**
+ * @brief Compute CRC32-IEEE checksum
+ * @param data Data buffer
+ * @param len Data length in bytes
+ * @return CRC32 checksum value
+ */
 static uint32_t crc32_ieee(const uint8_t* data, size_t len) noexcept
 {
     uint32_t crc = 0xFFFFFFFFu;
@@ -25,9 +36,12 @@ static uint32_t crc32_ieee(const uint8_t* data, size_t len) noexcept
 }
 
 #pragma pack(push, 1)
+/**
+ * @brief Settings blob with CRC32 for integrity checking
+ */
 struct SettingsBlob {
-    Settings settings;
-    uint32_t crc32;
+    Settings settings;  ///< Settings data
+    uint32_t crc32;     ///< CRC32 checksum of settings
 };
 #pragma pack(pop)
 

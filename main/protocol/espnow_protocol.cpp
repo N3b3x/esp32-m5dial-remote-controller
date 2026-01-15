@@ -35,6 +35,7 @@ struct RawMsg {
     uint8_t src_mac[6];
 };
 
+// Forward declarations
 static void espnowRecvCb(const esp_now_recv_info_t* info, const uint8_t* data, int len);
 static void espnowSendCb(const wifi_tx_info_t* info, esp_now_send_status_t status);
 static void recvTask(void*);
@@ -42,6 +43,10 @@ static void handlePacket(const RawMsg& msg, const uint8_t* data, int len);
 static void handlePairingResponse(const uint8_t* src_mac, const espnow::EspNowPacket& pkt);
 static void handlePairingReject(const uint8_t* src_mac, const espnow::EspNowPacket& pkt);
 
+/**
+ * @brief Try to add ESP-NOW peer (ignores if already exists)
+ * @param mac MAC address (6 bytes)
+ */
 static void tryAddEspNowPeer(const uint8_t mac[6])
 {
     if (IsZeroMac(mac)) return;
@@ -57,6 +62,15 @@ static void tryAddEspNowPeer(const uint8_t mac[6])
     }
 }
 
+/**
+ * @brief Send ESP-NOW packet to specific MAC address
+ * @param dst_mac Destination MAC address (6 bytes)
+ * @param device_id Device identifier
+ * @param type Message type
+ * @param payload Payload data (may be nullptr)
+ * @param payload_len Payload length
+ * @return true if send successful, false otherwise
+ */
 static bool sendPacketTo(const uint8_t* dst_mac, uint8_t device_id,
                          espnow::MsgType type, const void* payload, uint8_t payload_len)
 {
@@ -92,6 +106,14 @@ static bool sendPacketTo(const uint8_t* dst_mac, uint8_t device_id,
     return true;
 }
 
+/**
+ * @brief Send ESP-NOW packet to target device (first FatigueTester peer)
+ * @param device_id Device identifier
+ * @param type Message type
+ * @param payload Payload data (may be nullptr)
+ * @param payload_len Payload length
+ * @return true if send successful, false if no target configured
+ */
 static bool sendPacketToTarget(uint8_t device_id, espnow::MsgType type,
                                const void* payload, uint8_t payload_len)
 {
@@ -495,6 +517,10 @@ static void handlePacket(const RawMsg& msg, const uint8_t* data, int len)
     }
 }
 
+/**
+ * @brief Receive task - processes packets from ISR queue
+ * @param arg Task argument (unused)
+ */
 static void recvTask(void* arg)
 {
     (void)arg;

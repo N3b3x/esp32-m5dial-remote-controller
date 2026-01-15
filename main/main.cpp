@@ -1,3 +1,10 @@
+/**
+ * @file main.cpp
+ * @brief Main application entry point for M5Dial remote controller
+ * @details Initializes NVS, M5Unified hardware, ESP-NOW protocol, and UI controller.
+ *          Runs the main application loop handling user input and protocol events.
+ */
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -13,6 +20,19 @@
 
 static const char* TAG_ = "app";
 
+/**
+ * @brief Main application entry point
+ * @details Initializes the M5Dial remote controller system:
+ *          - NVS flash storage (required for WiFi/ESP-NOW)
+ *          - M5Unified hardware (display, encoder, buttons)
+ *          - ESP-NOW protocol stack with event queue
+ *          - UI controller for user interaction
+ * 
+ *          Then enters the main loop:
+ *          - Updates M5 hardware state
+ *          - Processes UI events and rendering
+ *          - Delays 16ms (~60 FPS)
+ */
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG_, "Booting M5Dial remote controller...");

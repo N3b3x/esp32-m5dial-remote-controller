@@ -56,8 +56,17 @@ inline float lerp(float a, float b, float t) {
  */
 class AnimatedValue {
 public:
+    /**
+     * @brief Default constructor
+     */
     AnimatedValue() = default;
 
+    /**
+     * @brief Set target value with animation
+     * @param target Target value
+     * @param duration_ms Animation duration in milliseconds
+     * @param current_time_ms Current time in milliseconds
+     */
     void setTarget(float target, uint32_t duration_ms, uint32_t current_time_ms) {
         start_value_ = getCurrentValue(current_time_ms);
         target_value_ = target;
@@ -65,6 +74,11 @@ public:
         anim_duration_ms_ = duration_ms;
     }
 
+    /**
+     * @brief Set value immediately without animation
+     * @param value Value to set
+     * @param current_time_ms Current time in milliseconds
+     */
     void setImmediate(float value, uint32_t current_time_ms) {
         start_value_ = value;
         target_value_ = value;
@@ -72,6 +86,11 @@ public:
         anim_duration_ms_ = 0;
     }
 
+    /**
+     * @brief Get current animated value
+     * @param current_time_ms Current time in milliseconds
+     * @return Current interpolated value
+     */
     float getCurrentValue(uint32_t current_time_ms) const {
         if (anim_duration_ms_ == 0) {
             return target_value_;
@@ -92,33 +111,37 @@ public:
         return (current_time_ms - anim_start_ms_) < anim_duration_ms_;
     }
 
+    /**
+     * @brief Get target value
+     * @return Target value
+     */
     float getTarget() const { return target_value_; }
 
 private:
-    float start_value_ = 0.0f;
-    float target_value_ = 0.0f;
-    uint32_t anim_start_ms_ = 0;
-    uint32_t anim_duration_ms_ = 0;
+    float start_value_ = 0.0f;          ///< Animation start value
+    float target_value_ = 0.0f;         ///< Animation target value
+    uint32_t anim_start_ms_ = 0;        ///< Animation start time
+    uint32_t anim_duration_ms_ = 0;    ///< Animation duration
 };
 
 /**
  * @brief Point in 2D space
  */
 struct Point2D {
-    float x = 0.0f;
-    float y = 0.0f;
+    float x = 0.0f;  ///< X coordinate
+    float y = 0.0f;  ///< Y coordinate
 };
 
 /**
  * @brief Menu item configuration
  */
 struct MenuItem {
-    const char* tag_up = nullptr;      // First line of label (shown in center)
-    const char* tag_down = nullptr;    // Second line of label (optional)
-    uint16_t color = 0xFFFF;           // Icon background color (RGB565)
-    const uint16_t* icon_data = nullptr;  // Pointer to icon pixel data (42x42 RGB565)
-    int16_t icon_w = 42;
-    int16_t icon_h = 42;
+    const char* tag_up = nullptr;         ///< First line of label (shown in center)
+    const char* tag_down = nullptr;       ///< Second line of label (optional)
+    uint16_t color = 0xFFFF;              ///< Icon background color (RGB565)
+    const uint16_t* icon_data = nullptr;  ///< Pointer to icon pixel data (42x42 RGB565)
+    int16_t icon_w = 42;                   ///< Icon width
+    int16_t icon_h = 42;                   ///< Icon height
 };
 
 /**
@@ -126,31 +149,31 @@ struct MenuItem {
  */
 struct CircularMenuConfig {
     // Center of the display
-    int16_t center_x = 120;
-    int16_t center_y = 120;
+    int16_t center_x = 120;            ///< Display center X coordinate
+    int16_t center_y = 120;            ///< Display center Y coordinate
     
     // Radii for positioning
-    int16_t icon_radius = 95;          // Distance from center to icon centers
-    int16_t selector_radius = 60;      // Distance from center to selector dot
+    int16_t icon_radius = 95;          ///< Distance from center to icon centers
+    int16_t selector_radius = 60;      ///< Distance from center to selector dot
     
     // Icon appearance
-    int16_t icon_bg_radius = 22;       // Radius of circular icon background
-    int16_t icon_selected_offset = 3;  // Extra radius for selected icon
-    float icon_selected_scale = 1.1f;  // Scale factor for selected icon
+    int16_t icon_bg_radius = 22;       ///< Radius of circular icon background
+    int16_t icon_selected_offset = 3;  ///< Extra radius for selected icon
+    float icon_selected_scale = 1.1f;  ///< Scale factor for selected icon
     
     // Selector appearance
-    int16_t selector_dot_radius = 5;   // Radius of the white selector dot
-    uint16_t selector_color = 0xF3E9;  // 0xF3E9D2 converted to RGB565 (cream/off-white)
+    int16_t selector_dot_radius = 5;   ///< Radius of the white selector dot
+    uint16_t selector_color = 0xF3E9;  ///< Selector color (RGB565, cream/off-white)
     
     // Animation
-    uint32_t anim_duration_ms = 300;   // Duration for selector animation
+    uint32_t anim_duration_ms = 300;   ///< Duration for selector animation (ms)
     
     // Interaction
-    int16_t center_touch_radius = 50;  // Touch radius for center button
+    int16_t center_touch_radius = 50;  ///< Touch radius for center button
     
     // Theme colors
-    uint16_t theme_fg = 0xFA00;        // 0xFA7000 -> orange theme
-    uint16_t theme_bg = 0x0000;        // Black background
+    uint16_t theme_fg = 0xFA00;        ///< Theme foreground color (RGB565, orange)
+    uint16_t theme_bg = 0x0000;        ///< Theme background color (RGB565, black)
 };
 
 /**
@@ -158,14 +181,28 @@ struct CircularMenuConfig {
  */
 class CircularMenuSelector {
 public:
+    /**
+     * @brief Default constructor
+     */
     CircularMenuSelector() = default;
 
+    /**
+     * @brief Initialize menu selector with configuration
+     * @param config Menu configuration
+     * @param num_items Number of menu items
+     */
     void init(const CircularMenuConfig& config, int num_items) {
         config_ = config;
         num_items_ = num_items;
         computePositions_();
     }
 
+    /**
+     * @brief Set selected menu index
+     * @param index Menu item index (0-based)
+     * @param current_time_ms Current time in milliseconds
+     * @param animate Whether to animate the transition
+     */
     void setSelectedIndex(int index, uint32_t current_time_ms, bool animate = true) {
         if (index < 0 || index >= num_items_) {
             return;
@@ -186,18 +223,35 @@ public:
         selected_index_ = index;
     }
 
+    /**
+     * @brief Move to next menu item
+     * @param current_time_ms Current time in milliseconds
+     */
     void goNext(uint32_t current_time_ms) {
         int next = (selected_index_ + 1) % num_items_;
         setSelectedIndex(next, current_time_ms, true);
     }
 
+    /**
+     * @brief Move to previous menu item
+     * @param current_time_ms Current time in milliseconds
+     */
     void goPrev(uint32_t current_time_ms) {
         int prev = (selected_index_ - 1 + num_items_) % num_items_;
         setSelectedIndex(prev, current_time_ms, true);
     }
 
+    /**
+     * @brief Get currently selected index
+     * @return Selected menu item index
+     */
     int getSelectedIndex() const { return selected_index_; }
 
+    /**
+     * @brief Get current selector position (animated)
+     * @param current_time_ms Current time in milliseconds
+     * @return Selector position
+     */
     Point2D getSelectorPosition(uint32_t current_time_ms) const {
         return {
             selector_x_.getCurrentValue(current_time_ms),
@@ -205,6 +259,11 @@ public:
         };
     }
 
+    /**
+     * @brief Get icon position for menu item
+     * @param index Menu item index
+     * @return Icon position (or {0,0} if invalid)
+     */
     Point2D getIconPosition(int index) const {
         if (index < 0 || index >= num_items_ || index >= kMaxItems) {
             return {0, 0};
@@ -212,17 +271,34 @@ public:
         return icon_positions_[index];
     }
 
+    /**
+     * @brief Check if selector is currently animating
+     * @param current_time_ms Current time in milliseconds
+     * @return true if animating, false otherwise
+     */
     bool isAnimating(uint32_t current_time_ms) const {
         return selector_x_.isAnimating(current_time_ms) || selector_y_.isAnimating(current_time_ms);
     }
 
+    /**
+     * @brief Get menu configuration
+     * @return Reference to configuration
+     */
     const CircularMenuConfig& getConfig() const { return config_; }
+    
+    /**
+     * @brief Get number of menu items
+     * @return Number of items
+     */
     int getNumItems() const { return num_items_; }
 
 private:
-    static constexpr int kMaxItems = 12;  // Maximum supported menu items
-    static constexpr float kPi = 3.14159265f;
+    static constexpr int kMaxItems = 12;  ///< Maximum supported menu items
+    static constexpr float kPi = 3.14159265f;  ///< Pi constant
 
+    /**
+     * @brief Compute icon and selector positions in a circle
+     */
     void computePositions_() {
         // Pre-compute icon and selector positions in a circle
         // Start from -90 degrees (12 o'clock position) and go clockwise
@@ -242,15 +318,15 @@ private:
         }
     }
 
-    CircularMenuConfig config_;
-    int num_items_ = 0;
-    int selected_index_ = 0;
+    CircularMenuConfig config_;              ///< Menu configuration
+    int num_items_ = 0;                      ///< Number of menu items
+    int selected_index_ = 0;                 ///< Currently selected index
     
-    Point2D icon_positions_[kMaxItems];
-    Point2D selector_positions_[kMaxItems];
+    Point2D icon_positions_[kMaxItems];      ///< Pre-computed icon positions
+    Point2D selector_positions_[kMaxItems];   ///< Pre-computed selector positions
     
-    AnimatedValue selector_x_;
-    AnimatedValue selector_y_;
+    AnimatedValue selector_x_;               ///< Animated X position
+    AnimatedValue selector_y_;               ///< Animated Y position
 };
 
 } // namespace ui

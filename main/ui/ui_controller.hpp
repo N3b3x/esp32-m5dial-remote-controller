@@ -1,3 +1,11 @@
+/**
+ * @file ui_controller.hpp
+ * @brief Main UI controller for M5Dial remote controller
+ * @details Manages all UI pages, user input, protocol events, and rendering.
+ *          Implements circular menu navigation, settings editing, bounds finding,
+ *          live counter, and terminal log display.
+ */
+
 #pragma once
 
 #include "freertos/FreeRTOS.h"
@@ -25,10 +33,34 @@
 
 namespace ui {
 
+/**
+ * @brief Main UI controller class
+ * @details Handles all user interface functionality including:
+ *          - Circular menu navigation (M5Dial factory demo style)
+ *          - Settings editing with value editors
+ *          - Bounds finding interface
+ *          - Live counter with test control
+ *          - Terminal log viewer
+ */
 class UiController {
 public:
+    /**
+     * @brief Construct UI controller
+     * @param proto_events FreeRTOS queue for protocol events
+     * @param settings Pointer to application settings (must remain valid)
+     */
     UiController(QueueHandle_t proto_events, Settings* settings) noexcept;
+    
+    /**
+     * @brief Initialize UI controller
+     * @details Sets up encoder, display, and shows boot animation
+     */
     void Init() noexcept;
+    
+    /**
+     * @brief Main UI tick function
+     * @details Call this regularly (~60 FPS) to update UI and handle input
+     */
     void Tick() noexcept;
 
 private:
