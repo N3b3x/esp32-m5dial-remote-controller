@@ -77,7 +77,7 @@ idf_component_register(
     REQUIRES ${MAIN_REQUIRES}
 )
 
-target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
+target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_20)
 
 if(BUILD_TYPE STREQUAL "Debug")
     target_compile_options(${COMPONENT_LIB} PRIVATE
