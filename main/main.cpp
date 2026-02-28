@@ -49,8 +49,10 @@ extern "C" void app_main(void)
         // Continue anyway - WiFi may not work but display will
     }
     
-    // Use default settings (skip full settings store for now)
-    Settings settings{};
+    // Load persisted settings (NVS + CRC32 validation; falls back to defaults)
+    Settings settings = SettingsStore::Load();
+    ESP_LOGI(TAG_, "Settings loaded (manual bounds %s)",
+             settings.manual_bounds.valid ? "valid" : "not set");
 
     // Initialize M5Unified with M5Dial board
     auto cfg = M5.config();
@@ -70,13 +72,14 @@ extern "C" void app_main(void)
 
     (void)espnow::Init(proto_queue);
 
-    // Initialize and run UI
-    ui::UiController ui(proto_queue, &settings);
-    ui.Init();
+    // Initialize and run UI (heap-allocated: UiController contains a
+    // 12 KB log ring-buffer that must not live on the main-task stack).
+    auto* ui = new ui::UiController(proto_queue, &settings);
+    ui->Init();
 
     while (true) {
         M5.update();
-        ui.Tick();
+        ui->Tick();
         vTaskDelay(pdMS_TO_TICKS(16));
     }
 }

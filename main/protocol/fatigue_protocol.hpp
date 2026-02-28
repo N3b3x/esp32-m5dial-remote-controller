@@ -37,6 +37,15 @@ enum class CommandId : uint8_t {
     Resume = 3,             ///< Resume paused test
     Stop = 4,               ///< Stop test
     RunBoundsFinding = 5,   ///< Run bounds finding (dedicated command)
+    SetManualBounds = 6,    ///< (legacy, unused) Set manual bounds single-shot
+    ManualBoundsStart = 7,      ///< Start manual bounds mode: disengage motor
+    ManualBoundsArmPlaced = 8,  ///< Arm at left stop: engage motor, set reference
+    ManualBoundsJog = 9,        ///< Jog to abs position (float: degrees from left stop)
+    ManualBoundsConfirm = 10,   ///< Confirm bounds (payload: center_deg f32, local_gap_deg f32)
+    ManualBoundsCancel = 11,    ///< Cancel manual bounds finding
+    ManualBoundsReZero = 12,    ///< Re-zero motor position at current location
+    StartWithManualBounds = 13, ///< Start test reusing cached manual bounds (center, gap, fix_offset)
+    StartWithManualRealign = 14, ///< Start test after manual encoder realignment (skip hard-drive)
 };
 
 /**

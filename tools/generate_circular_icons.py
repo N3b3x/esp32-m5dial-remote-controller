@@ -499,6 +499,123 @@ def draw_more_symbol(pixels: List[int], size: int, fg_color: int) -> None:
                 idx = y * size + x
                 pixels[idx] = blend_565(fg_color, pixels[idx], coverage * 0.93)
 
+def draw_manual_bounds_symbol(pixels: List[int], size: int, fg_color: int) -> None:
+    """Draw a manual bounds symbol: horizontal range bar with end ticks,
+    center crosshair diamond, directional arrows, and a hand/pointer above."""
+    cx = size / 2 - 0.5
+    cy = size / 2 - 0.5
+
+    # Range bar parameters
+    bar_y = cy + 3          # Slightly below center
+    bar_half = 12.0          # Half-width of the range bar
+    bar_thick = 1.8
+    tick_h = 8.0
+    tick_w = 1.8
+
+    # Diamond parameters
+    diamond_r = 3.0
+
+    # Arrow parameters
+    arrow_len = 4.0
+    arrow_head = 3.0
+    arrow_y = bar_y
+
+    # Hand pointer parameters
+    hand_cy = cy - 6
+    hand_h = 7.0
+    hand_w = 3.5
+    palm_w = 5.0
+    palm_h = 3.0
+
+    def manual_bounds_coverage(x: float, y: float) -> float:
+        coverage = 0.0
+
+        # --- Horizontal range bar ---
+        if abs(y - bar_y) < bar_thick and abs(x - cx) <= bar_half:
+            bar_edge = bar_half - abs(x - cx)
+            coverage = max(coverage, clamp(min(bar_edge + 0.5, bar_thick - abs(y - bar_y) + 0.5)))
+
+        # --- Left end tick ---
+        left_tick_x = cx - bar_half
+        if abs(x - left_tick_x) < tick_w and abs(y - bar_y) < tick_h / 2:
+            coverage = max(coverage, clamp(min(tick_w - abs(x - left_tick_x) + 0.5,
+                                               tick_h / 2 - abs(y - bar_y) + 0.5)))
+
+        # --- Right end tick ---
+        right_tick_x = cx + bar_half
+        if abs(x - right_tick_x) < tick_w and abs(y - bar_y) < tick_h / 2:
+            coverage = max(coverage, clamp(min(tick_w - abs(x - right_tick_x) + 0.5,
+                                               tick_h / 2 - abs(y - bar_y) + 0.5)))
+
+        # --- Center diamond ---
+        diamond_dist = abs(x - cx) + abs(y - bar_y)
+        if diamond_dist < diamond_r + 0.5:
+            if diamond_dist <= diamond_r - 0.5:
+                coverage = max(coverage, 1.0)
+            else:
+                coverage = max(coverage, clamp(diamond_r + 0.5 - diamond_dist))
+
+        # --- Center vertical crosshair ---
+        if abs(x - cx) < 1.0 and abs(y - bar_y) < tick_h / 2:
+            coverage = max(coverage, clamp(1.0 - abs(x - cx)))
+
+        # --- Left arrow (pointing left) ---
+        left_arr_tip_x = cx - bar_half + 3.0
+        if x >= left_arr_tip_x - arrow_len and x <= left_arr_tip_x:
+            # Shaft
+            if abs(y - arrow_y) < 1.0:
+                coverage = max(coverage, clamp(1.0 - abs(y - arrow_y)))
+            # Arrowhead
+            progress = (left_arr_tip_x - x) / arrow_len
+            head_half = arrow_head * progress
+            if abs(y - arrow_y) < head_half + 0.5:
+                if abs(y - arrow_y) <= head_half - 0.5:
+                    coverage = max(coverage, 1.0)
+                else:
+                    coverage = max(coverage, clamp(head_half + 0.5 - abs(y - arrow_y)))
+
+        # --- Right arrow (pointing right) ---
+        right_arr_tip_x = cx + bar_half - 3.0
+        if x >= right_arr_tip_x and x <= right_arr_tip_x + arrow_len:
+            # Shaft
+            if abs(y - arrow_y) < 1.0:
+                coverage = max(coverage, clamp(1.0 - abs(y - arrow_y)))
+            # Arrowhead
+            progress = (x - right_arr_tip_x) / arrow_len
+            head_half = arrow_head * progress
+            if abs(y - arrow_y) < head_half + 0.5:
+                if abs(y - arrow_y) <= head_half - 0.5:
+                    coverage = max(coverage, 1.0)
+                else:
+                    coverage = max(coverage, clamp(head_half + 0.5 - abs(y - arrow_y)))
+
+        # --- Hand/pointer icon above bar ---
+        # Finger (triangle pointing up)
+        if y >= hand_cy - hand_h and y <= hand_cy:
+            t_frac = (hand_cy - y) / hand_h  # 0 at base, 1 at tip
+            half_w = hand_w * (1.0 - t_frac)  # Narrows toward tip
+            if abs(x - cx) < half_w + 0.5:
+                if abs(x - cx) <= half_w - 0.5:
+                    coverage = max(coverage, 1.0)
+                else:
+                    coverage = max(coverage, clamp(half_w + 0.5 - abs(x - cx)))
+
+        # Palm base (small rectangle)
+        if y >= hand_cy and y <= hand_cy + palm_h and abs(x - cx) < palm_w / 2 + 0.5:
+            edge_y = min(y - hand_cy + 0.5, hand_cy + palm_h - y + 0.5)
+            edge_x = palm_w / 2 + 0.5 - abs(x - cx)
+            coverage = max(coverage, clamp(min(edge_y, edge_x)))
+
+        return coverage
+
+    for y in range(size):
+        for x in range(size):
+            coverage = sample_pixel_aa(x, y, size, manual_bounds_coverage)
+            if coverage > 0.01:
+                idx = y * size + x
+                pixels[idx] = blend_565(fg_color, pixels[idx], coverage * 0.93)
+
+
 def generate_icon(icon_def: IconDef, transparent: int = 0x0000) -> List[int]:
     """Generate a complete icon with background and symbol."""
     # Create circular background
@@ -521,6 +638,8 @@ def generate_icon(icon_def: IconDef, transparent: int = 0x0000) -> List[int]:
         draw_wifi_symbol(pixels, ICON_SIZE, symbol_color)
     elif icon_def.symbol == 'more':
         draw_more_symbol(pixels, ICON_SIZE, symbol_color)
+    elif icon_def.symbol == 'manual_bounds':
+        draw_manual_bounds_symbol(pixels, ICON_SIZE, symbol_color)
     
     return pixels
 
@@ -551,6 +670,7 @@ def main():
         IconDef("brightness", ICON_COLORS['orange'], "brightness"),
         IconDef("wifi", ICON_COLORS['mint'], "wifi"),
         IconDef("more", ICON_COLORS['gray'], "more"),
+        IconDef("manual_bounds", ICON_COLORS['orange'], "manual_bounds"),
     ]
     
     # Generate header file

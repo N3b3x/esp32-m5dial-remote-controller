@@ -68,6 +68,7 @@ private:
         Landing = 0,
         Settings,
         Bounds,
+        ManualBounds,
         LiveCounter,
         Terminal,
         Count
@@ -90,9 +91,10 @@ private:
 
     // Settings menu category/layer
     enum class SettingsCategory : uint8_t {
-        Main = 0,       // Top-level: Fatigue Test, Bounds Finding, UI
+        Main = 0,       // Top-level: Fatigue Test, Bounds Finding, Manual Align, UI
         FatigueTest,    // Cycles, VMAX/AMAX, Dwell
-        BoundsFinding,  // Mode, Search Speed, SG Min Vel, Stall Factor, Search Accel
+        BoundsFinding,  // Mode, Search Speed, SG Min Vel, Stall Factor, Search Accel, Auto Backoffs
+        ManualAlign,    // Manual bounds: Total Range, Left Backoff, Right Backoff
         UI              // Brightness
     };
 
@@ -124,7 +126,7 @@ private:
     static constexpr uint32_t kConnTimeout_ms = 3000;
 
     // Main menu (Landing) - Circular carousel like M5Dial factory demo
-    static constexpr int MENU_COUNT_ = 4;
+    static constexpr int MENU_COUNT_ = 5;
     int menu_index_ = 0;
     CircularMenuSelector menu_selector_{};
     CircularMenuConfig menu_config_{};
@@ -189,6 +191,55 @@ private:
     // Settings navigation: remember which main item opened a sub-category.
     int settings_return_main_index_ = 0;
 
+    // Manual Bounds - multi-step guided wizard
+    enum class ManualBoundsStep : uint8_t {
+        StartPrompt = 0, // Entry: Start / Back buttons
+        PlaceLeft,       // Motor OFF, push armature to left stop (animation)
+        ConfirmLeft,     // Confirm armature is at left stop
+        FixLeftOffset,   // Motor ON, fine-jog to correct stepper engage offset
+        JogFullRange,    // Motor ON, encoder jog to find right bound (full travel)
+        JogLeftBackoff,  // Motor at left bound, set left edge backoff
+        JogRightBackoff, // Motor at right bound, set right edge backoff
+        Summary,         // Review all bounds, confirm/cancel/back popup
+        Done,            // Success
+    };
+    enum class ManualBoundsPopup : uint8_t {
+        None = 0,
+        StepConfirm,     // Continue / Go Back / Exit (universal for jog steps)
+        SummaryActions,  // Confirm & Send / Go Back / Cancel
+    };
+    enum class ManualBoundsFocus : uint8_t { Action = 0, Back = 1 };
+    ManualBoundsStep manual_bounds_step_ = ManualBoundsStep::StartPrompt;
+    ManualBoundsFocus manual_bounds_focus_ = ManualBoundsFocus::Action;
+    ManualBoundsPopup manual_bounds_popup_ = ManualBoundsPopup::None;
+    uint8_t manual_bounds_popup_sel_ = 0;
+    float manual_bounds_jog_deg_ = 0.0f;           // Current jog position from left stop
+    float manual_bounds_total_range_deg_ = 0.0f;    // Full travel distance (left→right bound)
+    float manual_bounds_fix_offset_deg_ = 0.0f;     // Fix-left-offset jog correction
+    float manual_bounds_left_backoff_deg_ = 0.0f;   // Left edge backoff from global bound
+    float manual_bounds_right_backoff_deg_ = 0.0f;  // Right edge backoff from global bound
+    uint32_t manual_bounds_anim_start_ms_ = 0;  // Animation start timestamp
+    uint32_t manual_bounds_jog_send_ms_ = 0;    // Last jog command send time (throttle)
+    static constexpr float kManualBoundsStepSizes_[] = {0.1f, 0.5f, 1.0f, 2.0f, 5.0f, 10.0f};
+    static constexpr int kManualBoundsStepCount_ = 6;
+    int manual_bounds_step_idx_ = 2;  // Default to 1.0°
+    bool manual_bounds_cached_ = false;
+    float cached_manual_total_range_deg_ = 0.0f;
+    float cached_manual_left_backoff_deg_ = 0.0f;
+    float cached_manual_right_backoff_deg_ = 0.0f;
+
+    bool auto_bounds_cached_ = false;             // true when auto bounds saved in NVS
+    float cached_auto_total_range_deg_ = 0.0f;
+    float cached_auto_left_backoff_deg_ = 0.0f;
+    float cached_auto_right_backoff_deg_ = 0.0f;
+
+    bool use_auto_bounds_for_restart_ = false;    // Tracks which bounds set user selected
+
+    // Manual realignment at restart (encoder-based offset correction)
+    float realign_offset_deg_ = 0.0f;          // Current offset jog (no limits, free movement)
+    int realign_step_idx_ = 0;                  // Step size index (starts at 0.1°)
+    uint32_t realign_jog_send_ms_ = 0;          // Throttle jog commands
+
     // Bounds finding
     enum class BoundsState : uint8_t {
         Idle = 0,
@@ -220,10 +271,15 @@ private:
     enum class LiveFocus : uint8_t { Actions = 0, Back = 1 };
     enum class LivePopupMode : uint8_t {
         None = 0,
-        StartConfirm,     // Idle state: CANCEL / START
-        RunningActions,   // Running: BACK / PAUSE / STOP
-        PausedActions,    // Paused: BACK / RESUME / STOP
-        QuickSettings     // Long-press: quick settings menu
+        StartConfirm,       // Idle state: CANCEL / START (no prior manual bounds)
+        BoundsChoice,       // Idle state: CANCEL / USE MANUAL / AUTO FIND
+        ManualStartPlace,   // Place armature at left stop (press to continue, hold to cancel)
+        ManualStartChoice,  // Choose: Auto Align / Manual Jog / Cancel
+        ManualRealign,      // Encoder-based manual offset adjustment (negative only)
+        ManualRealignConfirm, // Confirm realign: Continue / Go Back / Cancel
+        RunningActions,     // Running: BACK / PAUSE / STOP
+        PausedActions,      // Paused: BACK / RESUME / STOP
+        QuickSettings       // Long-press: quick settings menu
     };
     LiveFocus live_focus_ = LiveFocus::Actions;
     LivePopupMode live_popup_mode_ = LivePopupMode::None;
@@ -282,6 +338,7 @@ private:
     // Remember last selection inside each submenu (skip index 0 "< Back").
     int settings_last_fatigue_index_ = 1;
     int settings_last_bounds_index_ = 1;
+    int settings_last_manual_align_index_ = 1;
     int settings_last_ui_index_ = 1;
 
     // Visual feedback
@@ -335,6 +392,13 @@ private:
     void applySettingsEditorValue_() noexcept;
     void discardSettingsEditorValue_() noexcept;
     void drawBounds_(uint32_t now_ms) noexcept;
+    void drawManualBounds_(uint32_t now_ms) noexcept;
+    void drawManualBoundsPopup_(uint32_t now_ms) noexcept;
+    void handleManualBoundsPopupInput_(int delta, bool click, uint32_t now_ms) noexcept;
+    void sendManualBoundsCancel_() noexcept;
+    void resetManualBoundsWizard_() noexcept;
+    void drawRadarArmature_(int16_t cx, int16_t cy, float angle_deg,
+                            float sweep_min_deg, float sweep_max_deg, uint32_t now_ms) noexcept;
     void drawLiveCounter_(uint32_t now_ms) noexcept;
     void drawLivePopup_(uint32_t now_ms) noexcept;
     void handleLivePopupInput_(int delta, bool click, uint32_t now_ms) noexcept;

@@ -37,11 +37,36 @@ struct UiSettings {
 };
 
 /**
+ * @brief Persistent manual bounds data (from manual bounds wizard)
+ * @details Stores cached manual bounds so they survive reboots.
+ */
+struct ManualBoundsSettings {
+    bool     valid = false;                           ///< true once wizard has been completed at least once
+    float    total_range_deg = 0.0f;                  ///< Full travel (left→right physical stop)
+    float    left_backoff_deg = 0.0f;                 ///< Left edge backoff from physical stop
+    float    right_backoff_deg = 0.0f;                ///< Right edge backoff from physical stop
+};
+
+/**
+ * @brief Persistent auto bounds settings
+ * @details Stores auto-found bounds (from StallGuard) so they survive reboots,
+ *          plus backoff values applied by ESP32.
+ */
+struct AutoBoundsSettings {
+    bool     valid = false;                           ///< true once auto bounds have been found at least once
+    float    total_range_deg = 0.0f;                  ///< Full travel found by StallGuard (global_max - global_min)
+    float    left_backoff_deg = 3.6f;                 ///< Left backoff from auto-found bound (default 2 full steps)
+    float    right_backoff_deg = 3.6f;                ///< Right backoff from auto-found bound (default 2 full steps)
+};
+
+/**
  * @brief Complete application settings
  */
 struct Settings {
     TestUnitSettings test_unit;                       ///< Test unit configuration
     UiSettings ui;                                   ///< UI display settings
+    ManualBoundsSettings manual_bounds;               ///< Cached manual bounds (persisted across reboots)
+    AutoBoundsSettings auto_bounds;                   ///< Auto bounds backoff settings
 };
 
 /**

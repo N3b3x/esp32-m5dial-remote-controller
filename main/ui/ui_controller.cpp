@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <inttypes.h>
 #include <cmath>
 
@@ -51,9 +52,13 @@ static void applyConfigToSettings_(Settings& s, const fatigue_proto::ConfigPaylo
 const ui::UiController::CircularMenuItem ui::UiController::kMenuItems_[MENU_COUNT_] = {
     {"Settings", nullptr, ui::assets::CircularIconColors::red, ui::assets::kCircularIcon_settings, 42, 42, Page::Settings},
     {"Find", "Bounds", ui::assets::CircularIconColors::blue, ui::assets::kCircularIcon_bounds, 42, 42, Page::Bounds},
+    {"Manual", "Bounds", ui::assets::CircularIconColors::orange, ui::assets::kCircularIcon_manual_bounds, 42, 42, Page::ManualBounds},
     {"Live", "Counter", ui::assets::CircularIconColors::green, ui::assets::kCircularIcon_live, 42, 42, Page::LiveCounter},
     {"Terminal", nullptr, ui::assets::CircularIconColors::teal, ui::assets::kCircularIcon_terminal, 42, 42, Page::Terminal},
 };
+
+// Out-of-line definition for static constexpr array (required for odr-use)
+constexpr float ui::UiController::kManualBoundsStepSizes_[];
 
 ui::UiController::UiController(QueueHandle_t proto_events, Settings* settings) noexcept
     : proto_events_(proto_events)
@@ -125,6 +130,30 @@ void ui::UiController::Init() noexcept
 
     if (settings_ != nullptr) {
         M5.Display.setBrightness(settings_->ui.brightness);
+
+        // Restore cached manual bounds from NVS
+        if (settings_->manual_bounds.valid) {
+            cached_manual_total_range_deg_ = settings_->manual_bounds.total_range_deg;
+            cached_manual_left_backoff_deg_ = settings_->manual_bounds.left_backoff_deg;
+            cached_manual_right_backoff_deg_ = settings_->manual_bounds.right_backoff_deg;
+            manual_bounds_cached_ = true;
+            ESP_LOGI(TAG_, "Restored manual bounds: range=%.1f L=%.1f R=%.1f",
+                     cached_manual_total_range_deg_,
+                     cached_manual_left_backoff_deg_,
+                     cached_manual_right_backoff_deg_);
+        }
+
+        // Restore cached auto bounds from NVS
+        if (settings_->auto_bounds.valid) {
+            cached_auto_total_range_deg_ = settings_->auto_bounds.total_range_deg;
+            cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
+            cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+            auto_bounds_cached_ = true;
+            ESP_LOGI(TAG_, "Restored auto bounds: range=%.1f L=%.1f R=%.1f",
+                     cached_auto_total_range_deg_,
+                     cached_auto_left_backoff_deg_,
+                     cached_auto_right_backoff_deg_);
+        }
     } else {
         M5.Display.setBrightness(128);
     }
@@ -262,6 +291,8 @@ const char* ui::UiController::pageName_(Page p) noexcept
             return "Settings";
         case Page::Bounds:
             return "Bounds";
+        case Page::ManualBounds:
+            return "ManualBnds";
         case Page::LiveCounter:
             return "Live";
         case Page::Terminal:
@@ -460,6 +491,23 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                         bounds_state_ = BoundsState::Complete;
                         bounds_state_since_ms_ = now_ms;
                         dirty_ = true;
+
+                        // Save auto bounds to NVS when complete + valid
+                        if (bounds_have_result_ && !bounds_cancelled_ && settings_ != nullptr) {
+                            const float auto_range = bounds_global_max_deg_ - bounds_global_min_deg_;
+                            settings_->auto_bounds.valid = true;
+                            settings_->auto_bounds.total_range_deg = auto_range;
+                            // Backoffs already set from settings menu (keep current values)
+                            SettingsStore::Save(*settings_);
+                            cached_auto_total_range_deg_ = auto_range;
+                            cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
+                            cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+                            auto_bounds_cached_ = true;
+                            ESP_LOGI(TAG_, "Auto bounds saved: range=%.1f L=%.1f R=%.1f",
+                                     auto_range,
+                                     cached_auto_left_backoff_deg_,
+                                     cached_auto_right_backoff_deg_);
+                        }
                     }
                 }
                 break;
@@ -589,26 +637,101 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
             return;
         }
     }
-    
-    // LiveCounter: long-press opens Quick Settings (only during Running/Paused)
-    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::None) {
+
+    // ManualBounds: long-press behaviour varies by step
+    if (page_ == Page::ManualBounds) {
         if (M5.BtnA.wasReleasedAfterHold()) {
-            const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
-            const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
-            
-            if (test_state == fatigue_proto::TestState::Running || test_state == fatigue_proto::TestState::Paused) {
-                // Sync edit_settings_ from machine config before opening Quick Settings
-                if (settings_ != nullptr) {
-                    edit_settings_ = *settings_;
-                }
-                // Open quick settings
-                live_popup_mode_ = LivePopupMode::QuickSettings;
-                quick_settings_index_ = 0;
-                quick_settings_editing_ = false;
-                quick_settings_confirm_popup_ = false;
-                playBeep_(2);
+            if (manual_bounds_step_ == ManualBoundsStep::FixLeftOffset) {
+                // Cycle step size (FixLeftOffset only — no cancel needed, has Back via short-press)
+                manual_bounds_step_idx_ = (manual_bounds_step_idx_ + 1) % kManualBoundsStepCount_;
+                playBeep_(1);
                 dirty_ = true;
                 return;
+            }
+            if (manual_bounds_step_ == ManualBoundsStep::JogFullRange ||
+                manual_bounds_step_ == ManualBoundsStep::JogLeftBackoff ||
+                manual_bounds_step_ == ManualBoundsStep::JogRightBackoff) {
+                // Long-press on jog steps → cycle step size (same as FixLeftOffset)
+                manual_bounds_step_idx_ = (manual_bounds_step_idx_ + 1) % kManualBoundsStepCount_;
+                playBeep_(1);
+                dirty_ = true;
+                return;
+            }
+            // Long-press on PlaceLeft / ConfirmLeft / StartPrompt → cancel & exit
+            if (manual_bounds_step_ == ManualBoundsStep::PlaceLeft ||
+                manual_bounds_step_ == ManualBoundsStep::ConfirmLeft ||
+                manual_bounds_step_ == ManualBoundsStep::StartPrompt) {
+                sendManualBoundsCancel_();
+                resetManualBoundsWizard_();
+                page_ = Page::Landing;
+                playBeep_(0);
+                dirty_ = true;
+                return;
+            }
+            // Long-press on Summary → go back to JogRightBackoff
+            if (manual_bounds_step_ == ManualBoundsStep::Summary &&
+                manual_bounds_popup_ == ManualBoundsPopup::None) {
+                manual_bounds_step_ = ManualBoundsStep::JogRightBackoff;
+                playBeep_(0);
+                dirty_ = true;
+                return;
+            }
+        }
+    }
+    
+    // LiveCounter: long-press opens Quick Settings (only during Running/Paused)
+    // or cancels ManualStartPlace popup, or cycles ManualRealign step size
+    if (page_ == Page::LiveCounter) {
+        if (M5.BtnA.wasReleasedAfterHold()) {
+            // ManualRealign: long-press cycles step size
+            if (live_popup_mode_ == LivePopupMode::ManualRealign) {
+                realign_step_idx_ = (realign_step_idx_ + 1) % kManualBoundsStepCount_;
+                playBeep_(1);
+                dirty_ = true;
+                return;
+            }
+            // ManualStartPlace: long-press cancels back to Landing
+            if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
+                live_popup_mode_ = LivePopupMode::None;
+                page_ = Page::Landing;
+                playBeep_(0);
+                dirty_ = true;
+                return;
+            }
+            // ManualStartChoice: long-press cancels back to Landing
+            if (live_popup_mode_ == LivePopupMode::ManualStartChoice) {
+                live_popup_mode_ = LivePopupMode::None;
+                page_ = Page::Landing;
+                playBeep_(0);
+                dirty_ = true;
+                return;
+            }
+            // ManualRealignConfirm: long-press cancels back to Landing
+            if (live_popup_mode_ == LivePopupMode::ManualRealignConfirm) {
+                live_popup_mode_ = LivePopupMode::None;
+                page_ = Page::Landing;
+                playBeep_(0);
+                dirty_ = true;
+                return;
+            }
+            if (live_popup_mode_ == LivePopupMode::None) {
+                const bool use_status = (conn_status_ == ConnStatus::Connected && have_status_);
+                const auto test_state = use_status ? static_cast<fatigue_proto::TestState>(last_status_.state) : fatigue_proto::TestState::Idle;
+
+                if (test_state == fatigue_proto::TestState::Running || test_state == fatigue_proto::TestState::Paused) {
+                    // Sync edit_settings_ from machine config before opening Quick Settings
+                    if (settings_ != nullptr) {
+                        edit_settings_ = *settings_;
+                    }
+                    // Open quick settings
+                    live_popup_mode_ = LivePopupMode::QuickSettings;
+                    quick_settings_index_ = 0;
+                    quick_settings_editing_ = false;
+                    quick_settings_confirm_popup_ = false;
+                    playBeep_(2);
+                    dirty_ = true;
+                    return;
+                }
             }
         }
     }
@@ -719,6 +842,7 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
             switch (settings_category_) {
                 case SettingsCategory::FatigueTest: settings_last_fatigue_index_ = settings_index_; break;
                 case SettingsCategory::BoundsFinding: settings_last_bounds_index_ = settings_index_; break;
+                case SettingsCategory::ManualAlign: settings_last_manual_align_index_ = settings_index_; break;
                 case SettingsCategory::UI: settings_last_ui_index_ = settings_index_; break;
                 case SettingsCategory::Main: break;
             }
@@ -731,6 +855,105 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         if (delta != 0) {
             bounds_focus_ = (bounds_focus_ == BoundsFocus::Action) ? BoundsFocus::Back : BoundsFocus::Action;
             dirty_ = true;
+        }
+        return;
+    }
+
+    if (page_ == Page::ManualBounds) {
+        // Popup active → navigate popup
+        if (manual_bounds_popup_ != ManualBoundsPopup::None) {
+            handleManualBoundsPopupInput_(delta, false, now_ms);
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::StartPrompt) {
+            // Toggle Start / Back focus
+            manual_bounds_focus_ = (manual_bounds_focus_ == ManualBoundsFocus::Action)
+                                       ? ManualBoundsFocus::Back
+                                       : ManualBoundsFocus::Action;
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::FixLeftOffset) {
+            // Encoder adjusts motor position — no limits, user can move freely
+            // CCW (negative) = toward left bound, CW (positive) = away from left bound
+            float step = kManualBoundsStepSizes_[manual_bounds_step_idx_];
+            manual_bounds_fix_offset_deg_ += delta * step;
+            // Send jog to offset position
+            if ((now_ms - manual_bounds_jog_send_ms_) >= 50 || delta == 0) {
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &manual_bounds_fix_offset_deg_, sizeof(manual_bounds_fix_offset_deg_));
+                manual_bounds_jog_send_ms_ = now_ms;
+            }
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::JogFullRange) {
+            // Encoder jog adjusts position from left stop to find right bound
+            float step = kManualBoundsStepSizes_[manual_bounds_step_idx_];
+            manual_bounds_jog_deg_ += delta * step;
+            if (manual_bounds_jog_deg_ < 0.5f) manual_bounds_jog_deg_ = 0.5f;
+            if (manual_bounds_jog_deg_ > 340.0f) manual_bounds_jog_deg_ = 340.0f;
+            // Send jog command (throttled to ~20 Hz)
+            if ((now_ms - manual_bounds_jog_send_ms_) >= 50 || delta == 0) {
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &manual_bounds_jog_deg_, sizeof(manual_bounds_jog_deg_));
+                manual_bounds_jog_send_ms_ = now_ms;
+            }
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::JogLeftBackoff) {
+            // Encoder adjusts left edge backoff from left global bound
+            float step = kManualBoundsStepSizes_[manual_bounds_step_idx_];
+            manual_bounds_left_backoff_deg_ += delta * step;
+            if (manual_bounds_left_backoff_deg_ < 0.0f) manual_bounds_left_backoff_deg_ = 0.0f;
+            float max_backoff = manual_bounds_total_range_deg_ / 2.0f - 1.0f;
+            if (max_backoff < 0.0f) max_backoff = 0.0f;
+            if (manual_bounds_left_backoff_deg_ > max_backoff) manual_bounds_left_backoff_deg_ = max_backoff;
+            // Send jog to left_backoff position so user sees motor move inward
+            float jog_target = manual_bounds_left_backoff_deg_;
+            if ((now_ms - manual_bounds_jog_send_ms_) >= 50 || delta == 0) {
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &jog_target, sizeof(jog_target));
+                manual_bounds_jog_send_ms_ = now_ms;
+            }
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::JogRightBackoff) {
+            // Encoder adjusts right edge backoff from right global bound
+            float step = kManualBoundsStepSizes_[manual_bounds_step_idx_];
+            manual_bounds_right_backoff_deg_ += delta * step;
+            if (manual_bounds_right_backoff_deg_ < 0.0f) manual_bounds_right_backoff_deg_ = 0.0f;
+            float max_backoff = manual_bounds_total_range_deg_ / 2.0f - 1.0f;
+            if (max_backoff < 0.0f) max_backoff = 0.0f;
+            if (manual_bounds_right_backoff_deg_ > max_backoff) manual_bounds_right_backoff_deg_ = max_backoff;
+            // Send jog to (total_range - right_backoff) so user sees motor move inward from right
+            float jog_target = manual_bounds_total_range_deg_ - manual_bounds_right_backoff_deg_;
+            if ((now_ms - manual_bounds_jog_send_ms_) >= 50 || delta == 0) {
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &jog_target, sizeof(jog_target));
+                manual_bounds_jog_send_ms_ = now_ms;
+            }
+            dirty_ = true;
+            return;
+        }
+        if (manual_bounds_step_ == ManualBoundsStep::ConfirmLeft) {
+            // Toggle confirm / back
+            manual_bounds_focus_ = (manual_bounds_focus_ == ManualBoundsFocus::Action)
+                                       ? ManualBoundsFocus::Back
+                                       : ManualBoundsFocus::Action;
+            dirty_ = true;
+            return;
         }
         return;
     }
@@ -786,6 +1009,22 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
             live_focus_ = (live_focus_ == LiveFocus::Actions) ? LiveFocus::Back : LiveFocus::Actions;
             dirty_ = true;
         }
+        return;
+    }
+
+    if (page_ == Page::LiveCounter && live_popup_mode_ == LivePopupMode::ManualRealign) {
+        // Encoder adjusts offset for manual realignment — no limits, free movement
+        float step = kManualBoundsStepSizes_[realign_step_idx_];
+        realign_offset_deg_ += delta * step;
+        // Send jog command (throttled to ~20 Hz)
+        if ((now_ms - realign_jog_send_ms_) >= 50 || delta == 0) {
+            (void)espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                &realign_offset_deg_, sizeof(realign_offset_deg_));
+            realign_jog_send_ms_ = now_ms;
+        }
+        dirty_ = true;
         return;
     }
 
@@ -873,13 +1112,15 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             switch (settings_index_) {
                 case 1: settings_category_ = SettingsCategory::FatigueTest; break;
                 case 2: settings_category_ = SettingsCategory::BoundsFinding; break;
-                case 3: settings_category_ = SettingsCategory::UI; break;
+                case 3: settings_category_ = SettingsCategory::ManualAlign; break;
+                case 4: settings_category_ = SettingsCategory::UI; break;
                 default: break;
             }
             // Restore last selection inside the submenu (avoid jumping to "< Back").
             switch (settings_category_) {
                 case SettingsCategory::FatigueTest: settings_index_ = std::max(1, settings_last_fatigue_index_); break;
                 case SettingsCategory::BoundsFinding: settings_index_ = std::max(1, settings_last_bounds_index_); break;
+                case SettingsCategory::ManualAlign: settings_index_ = std::max(1, settings_last_manual_align_index_); break;
                 case SettingsCategory::UI: settings_index_ = std::max(1, settings_last_ui_index_); break;
                 default: settings_index_ = 1; break;
             }
@@ -915,6 +1156,88 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
 
         // If already waiting for ACK, ignore additional presses.
         playBeep_(1);
+        return;
+    }
+
+    if (page_ == Page::ManualBounds) {
+        // Handle popup first
+        if (manual_bounds_popup_ != ManualBoundsPopup::None) {
+            handleManualBoundsPopupInput_(0, true, now_ms);
+            dirty_ = true;
+            return;
+        }
+        playBeep_(2);
+        switch (manual_bounds_step_) {
+            case ManualBoundsStep::StartPrompt:
+                if (manual_bounds_focus_ == ManualBoundsFocus::Back) {
+                    resetManualBoundsWizard_();
+                    page_ = Page::Landing;
+                } else {
+                    // Send ManualBoundsStart (disengage motor)
+                    (void)espnow::SendCommand(
+                        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                        static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsStart),
+                        nullptr, 0);
+                    logf_(now_ms, "ManualBounds: start (disengage motor)");
+                    manual_bounds_step_ = ManualBoundsStep::PlaceLeft;
+                    manual_bounds_anim_start_ms_ = now_ms;
+                    manual_bounds_jog_deg_ = 0.0f;
+                }
+                break;
+            case ManualBoundsStep::PlaceLeft:
+                // Press → go to ConfirmLeft
+                manual_bounds_step_ = ManualBoundsStep::ConfirmLeft;
+                manual_bounds_focus_ = ManualBoundsFocus::Action;
+                break;
+            case ManualBoundsStep::ConfirmLeft:
+                if (manual_bounds_focus_ == ManualBoundsFocus::Back) {
+                    // Go back to PlaceLeft
+                    manual_bounds_step_ = ManualBoundsStep::PlaceLeft;
+                    manual_bounds_anim_start_ms_ = now_ms;
+                } else {
+                    // Confirm → send ArmPlaced (engage motor, capture left ref)
+                    (void)espnow::SendCommand(
+                        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                        static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsArmPlaced),
+                        nullptr, 0);
+                    logf_(now_ms, "ManualBounds: arm placed (engage motor)");
+                    manual_bounds_step_ = ManualBoundsStep::FixLeftOffset;
+                    manual_bounds_fix_offset_deg_ = 0.0f;
+                    manual_bounds_step_idx_ = 0; // 0.1° for fine offset correction
+                }
+                break;
+            case ManualBoundsStep::FixLeftOffset:
+                // Open step confirm popup (same as other jog steps)
+                manual_bounds_popup_ = ManualBoundsPopup::StepConfirm;
+                manual_bounds_popup_sel_ = 0;
+                break;
+            case ManualBoundsStep::JogFullRange:
+                // Open step confirm popup
+                manual_bounds_popup_ = ManualBoundsPopup::StepConfirm;
+                manual_bounds_popup_sel_ = 0;
+                break;
+            case ManualBoundsStep::JogLeftBackoff:
+                // Open step confirm popup
+                manual_bounds_popup_ = ManualBoundsPopup::StepConfirm;
+                manual_bounds_popup_sel_ = 0;
+                break;
+            case ManualBoundsStep::JogRightBackoff:
+                // Open step confirm popup
+                manual_bounds_popup_ = ManualBoundsPopup::StepConfirm;
+                manual_bounds_popup_sel_ = 0;
+                break;
+            case ManualBoundsStep::Summary:
+                // Press → open confirm/cancel/back popup
+                manual_bounds_popup_ = ManualBoundsPopup::SummaryActions;
+                manual_bounds_popup_sel_ = 0;
+                break;
+            case ManualBoundsStep::Done:
+                // Return to landing
+                resetManualBoundsWizard_();
+                page_ = Page::Landing;
+                break;
+        }
+        dirty_ = true;
         return;
     }
 
@@ -981,8 +1304,21 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             case fatigue_proto::TestState::Idle:
             case fatigue_proto::TestState::Completed:
             case fatigue_proto::TestState::Error:
-                live_popup_mode_ = LivePopupMode::StartConfirm;
-                live_popup_selection_ = 1; // Default to START
+                if ((manual_bounds_cached_ || auto_bounds_cached_) && 
+                    have_status_ && last_status_.bounds_valid == 0) {
+                    // Cached bounds (manual or auto) + ESP32 bounds invalid →
+                    // Go straight to placement screen (unified flow for restart)
+                    // Put ESP32 into MANUAL_BOUNDS state so ManualBoundsArmPlaced will work
+                    (void)espnow::SendCommand(
+                        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                        static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsStart),
+                        nullptr, 0);
+                    logf_(now_ms, "TX: ManualBoundsStart (unified restart)");
+                    live_popup_mode_ = LivePopupMode::ManualStartPlace;
+                } else {
+                    live_popup_mode_ = LivePopupMode::StartConfirm;
+                    live_popup_selection_ = 1; // Default to START
+                }
                 break;
             case fatigue_proto::TestState::Running:
                 live_popup_mode_ = LivePopupMode::RunningActions;
@@ -1012,6 +1348,10 @@ void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noex
             if (page_ == Page::Settings) {
                 settingsBack_();
             } else {
+                if (page_ == Page::ManualBounds) {
+                    sendManualBoundsCancel_();
+                    resetManualBoundsWizard_();
+                }
                 page_ = Page::Landing;
             }
             dirty_ = true;
@@ -1173,6 +1513,7 @@ void ui::UiController::enterSettings_() noexcept
 
     settings_last_fatigue_index_ = 1;
     settings_last_bounds_index_ = 1;
+    settings_last_manual_align_index_ = 1;
     settings_last_ui_index_ = 1;
 
     settings_popup_mode_ = SettingsPopupMode::None;
@@ -1191,11 +1532,12 @@ void ui::UiController::enterSettings_() noexcept
 int ui::UiController::getSettingsItemCount_() const noexcept
 {
     switch (settings_category_) {
-        case SettingsCategory::Main: return 4;
+        case SettingsCategory::Main: return 5;             // Back, Fatigue Test, Bounds Finding, Manual Align, UI Settings
         case SettingsCategory::FatigueTest: return 5;     // Back, Cycles, VMAX, AMAX, Dwell
-        case SettingsCategory::BoundsFinding: return 7;   // Back + 6 items
+        case SettingsCategory::BoundsFinding: return 9;   // Back + 6 existing + Auto L-Backoff + Auto R-Backoff
+        case SettingsCategory::ManualAlign: return 4;     // Back, Total Range, Left Backoff, Right Backoff
         case SettingsCategory::UI: return 2;              // Back, Brightness
-        default: return 4;
+        default: return 5;
     }
 }
 
@@ -1236,6 +1578,22 @@ void ui::UiController::settingsSave_(uint32_t now_ms) noexcept
     *settings_ = edit_settings_;
     (void)SettingsStore::Save(*settings_);
     logf_(now_ms, "UI: settings saved");
+
+    // Sync manual bounds cache from settings (user may have edited values)
+    if (settings_->manual_bounds.valid) {
+        cached_manual_total_range_deg_ = settings_->manual_bounds.total_range_deg;
+        cached_manual_left_backoff_deg_ = settings_->manual_bounds.left_backoff_deg;
+        cached_manual_right_backoff_deg_ = settings_->manual_bounds.right_backoff_deg;
+        manual_bounds_cached_ = true;
+    }
+
+    // Sync auto bounds cache from settings (user may have edited backoff values)
+    if (settings_->auto_bounds.valid) {
+        cached_auto_total_range_deg_ = settings_->auto_bounds.total_range_deg;
+        cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
+        cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+        auto_bounds_cached_ = true;
+    }
 
     // Apply brightness setting
     M5.Display.setBrightness(settings_->ui.brightness);
@@ -1350,6 +1708,27 @@ void ui::UiController::applySettingsEditorValue_() noexcept
                 } else if (settings_editor_index_ == 6) {
                     edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, settings_editor_f32_new_);
                     settings_dirty_ = true;
+                } else if (settings_editor_index_ == 7) {
+                    edit_settings_.auto_bounds.left_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 8) {
+                    edit_settings_.auto_bounds.right_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                }
+            }
+            break;
+
+        case SettingsCategory::ManualAlign:
+            if (settings_editor_type_ == SettingsEditorValueType::F32) {
+                if (settings_editor_index_ == 1) {
+                    edit_settings_.manual_bounds.total_range_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 2) {
+                    edit_settings_.manual_bounds.left_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 3) {
+                    edit_settings_.manual_bounds.right_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
                 }
             }
             break;
@@ -1433,6 +1812,30 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                     settings_editor_f32_old_ = round1(edit_settings_.test_unit.stall_detection_current_factor);
                 } else if (settings_index_ == 6) {
                     settings_editor_f32_old_ = round1(edit_settings_.test_unit.bounds_search_accel_rev_s2);
+                } else if (settings_index_ == 7) {
+                    settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.left_backoff_deg);
+                } else if (settings_index_ == 8) {
+                    settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.right_backoff_deg);
+                } else {
+                    settings_editor_f32_old_ = 0.0f;
+                }
+                settings_editor_f32_new_ = settings_editor_f32_old_;
+                initSettingsEditorStep_();
+            }
+            break;
+
+        case SettingsCategory::ManualAlign:
+            if (!edit_settings_.manual_bounds.valid) {
+                // Manual bounds not set — nothing to edit
+                settings_editor_type_ = SettingsEditorValueType::None;
+            } else {
+                settings_editor_type_ = SettingsEditorValueType::F32;
+                if (settings_index_ == 1) {
+                    settings_editor_f32_old_ = round1(edit_settings_.manual_bounds.total_range_deg);
+                } else if (settings_index_ == 2) {
+                    settings_editor_f32_old_ = round1(edit_settings_.manual_bounds.left_backoff_deg);
+                } else if (settings_index_ == 3) {
+                    settings_editor_f32_old_ = round1(edit_settings_.manual_bounds.right_backoff_deg);
                 } else {
                     settings_editor_f32_old_ = 0.0f;
                 }
@@ -1828,11 +2231,10 @@ void ui::UiController::drawModernButton_(int16_t x, int16_t y, int16_t w, int16_
     canvas_->drawRoundRect(x, y, w, h, h/4, border);
     
     canvas_->setTextColor(colors::text_primary);
-    canvas_->setTextSize(2); // Increased text size for better visibility
-    const int16_t tw = static_cast<int16_t>(canvas_->textWidth(label));
-    const int16_t th = 14; // Approximate height for text size 2
-    canvas_->setCursor(x + (w - tw) / 2, y + (h - th) / 2);
-    canvas_->print(label);
+    canvas_->setTextSize(2);
+    // Use textDatum for reliable vertical centering instead of manual cursor math
+    canvas_->setTextDatum(textdatum_t::middle_center);
+    canvas_->drawString(label, static_cast<int16_t>(x + w / 2), static_cast<int16_t>(y + h / 2 + 1));
 }
 
 void ui::UiController::drawActionButton_(int16_t x, int16_t y, int16_t w, int16_t h,
@@ -2005,6 +2407,9 @@ void ui::UiController::draw_(uint32_t now_ms) noexcept
             break;
         case Page::Bounds:
             drawBounds_(now_ms);
+            break;
+        case Page::ManualBounds:
+            drawManualBounds_(now_ms);
             break;
         case Page::LiveCounter:
             drawLiveCounter_(now_ms);
@@ -2182,18 +2587,21 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     const char* title = "SETTINGS";
     
     // Array to store labels and values
-    const char* labels[8]{};
-    char values[8][24]{};
+    const char* labels[10]{};
+    char values[10][24]{};
     
     // Main menu labels
-    static const char* main_labels[] = {"< Back", "Fatigue Test", "Bounds Finding", "UI Settings"};
-    static const char* main_values[] = {"Return to home", "Motion settings", "Stall detection", "Display options"};
+    static const char* main_labels[] = {"< Back", "Fatigue Test", "Bounds Finding", "Manual Align", "UI Settings"};
+    static const char* main_values[] = {"Return to home", "Motion settings", "Stall detection", "Cached bounds", "Display options"};
     
     // Fatigue Test labels - PROTOCOL V2: velocity/acceleration control
     static const char* fatigue_labels[] = {"< Back", "Cycles", "VMAX (RPM)", kLabelAmaxRevPerS2Ui, "Dwell (s)"};
     
-    // Bounds Finding labels
-    static const char* bounds_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "SGT", "Stall Factor", "Search Accel"};
+    // Bounds Finding labels (now includes auto backoffs)
+    static const char* bounds_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "SGT", "Stall Factor", "Search Accel", "Auto L-Backoff", "Auto R-Backoff"};
+    
+    // Manual Align labels
+    static const char* manual_align_labels[] = {"< Back", "Total Range", "Left Backoff", "Right Backoff"};
     
     // UI labels
     static const char* ui_labels[] = {"< Back", "Brightness"};
@@ -2201,7 +2609,7 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     switch (settings_category_) {
         case SettingsCategory::Main:
             title = "SETTINGS";
-            item_count = 4;
+            item_count = 5;
             for (int i = 0; i < item_count; ++i) {
                 labels[i] = main_labels[i];
                 snprintf(values[i], sizeof(values[i]), "%s", main_values[i]);
@@ -2225,7 +2633,7 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             
         case SettingsCategory::BoundsFinding:
             title = "BOUNDS";
-            item_count = 7;
+            item_count = 9;
             for (int i = 0; i < item_count; ++i) labels[i] = bounds_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%s", edit_settings_.test_unit.bounds_method_stallguard ? "StallGuard" : "Encoder");
@@ -2238,6 +2646,24 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             }
             snprintf(values[5], sizeof(values[5]), "%.1fx", static_cast<double>(edit_settings_.test_unit.stall_detection_current_factor));
             snprintf(values[6], sizeof(values[6]), "%.1f %s", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2), kUnitRevPerS2Ui);
+            snprintf(values[7], sizeof(values[7]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.left_backoff_deg));
+            snprintf(values[8], sizeof(values[8]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.right_backoff_deg));
+            break;
+            
+        case SettingsCategory::ManualAlign:
+            title = "MANUAL ALIGN";
+            item_count = 4;
+            for (int i = 0; i < item_count; ++i) labels[i] = manual_align_labels[i];
+            snprintf(values[0], sizeof(values[0]), "Back to settings");
+            if (edit_settings_.manual_bounds.valid) {
+                snprintf(values[1], sizeof(values[1]), "%.1f deg", static_cast<double>(edit_settings_.manual_bounds.total_range_deg));
+                snprintf(values[2], sizeof(values[2]), "%.1f deg", static_cast<double>(edit_settings_.manual_bounds.left_backoff_deg));
+                snprintf(values[3], sizeof(values[3]), "%.1f deg", static_cast<double>(edit_settings_.manual_bounds.right_backoff_deg));
+            } else {
+                snprintf(values[1], sizeof(values[1]), "Not set");
+                snprintf(values[2], sizeof(values[2]), "Not set");
+                snprintf(values[3], sizeof(values[3]), "Not set");
+            }
             break;
             
         case SettingsCategory::UI:
@@ -2399,6 +2825,13 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
             else if (settings_editor_index_ == 4) { label = "SGT"; }
             else if (settings_editor_index_ == 5) { label = "Stall Factor"; unit = "x"; }
             else if (settings_editor_index_ == 6) { label = "Search Accel"; unit = kUnitRevPerS2Ui; unit_is_rev_per_s2 = true; }
+            else if (settings_editor_index_ == 7) { label = "Auto L-Backoff"; unit = "deg"; }
+            else if (settings_editor_index_ == 8) { label = "Auto R-Backoff"; unit = "deg"; }
+            break;
+        case SettingsCategory::ManualAlign:
+            if (settings_editor_index_ == 1) { label = "Total Range"; unit = "deg"; }
+            else if (settings_editor_index_ == 2) { label = "Left Backoff"; unit = "deg"; }
+            else if (settings_editor_index_ == 3) { label = "Right Backoff"; unit = "deg"; }
             break;
         case SettingsCategory::UI:
             if (settings_editor_index_ == 1) { label = "Brightness"; unit = "%"; }
@@ -2716,6 +3149,10 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
                 else if (settings_editor_index_ == 3) { unit = "rpm"; }
                 else if (settings_editor_index_ == 5) { unit = "x"; }
                 else if (settings_editor_index_ == 6) { unit = kUnitRevPerS2Ui; }
+                else if (settings_editor_index_ == 7 || settings_editor_index_ == 8) { unit = "deg"; }
+                break;
+            case SettingsCategory::ManualAlign:
+                unit = "deg";
                 break;
             case SettingsCategory::UI:
                 if (settings_editor_index_ == 1) { unit = "%"; }
@@ -2972,6 +3409,885 @@ void ui::UiController::drawBounds_(uint32_t now_ms) noexcept
     th::drawConnectionDot(240 - 18, 18, conn_status_ == ConnStatus::Connected, now_ms);
 }
 
+// ─── Manual Bounds Helpers ──────────────────────────────────────────────────
+
+void ui::UiController::sendManualBoundsCancel_() noexcept
+{
+    (void)espnow::SendCommand(
+        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+        static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsCancel),
+        nullptr, 0);
+}
+
+void ui::UiController::resetManualBoundsWizard_() noexcept
+{
+    manual_bounds_step_ = ManualBoundsStep::StartPrompt;
+    manual_bounds_focus_ = ManualBoundsFocus::Action;
+    manual_bounds_popup_ = ManualBoundsPopup::None;
+    manual_bounds_popup_sel_ = 0;
+    manual_bounds_jog_deg_ = 0.0f;
+    manual_bounds_total_range_deg_ = 0.0f;
+    manual_bounds_fix_offset_deg_ = 0.0f;
+    manual_bounds_left_backoff_deg_ = 0.0f;
+    manual_bounds_right_backoff_deg_ = 0.0f;
+    manual_bounds_step_idx_ = 2;
+}
+
+void ui::UiController::handleManualBoundsPopupInput_(int delta, bool click, uint32_t now_ms) noexcept
+{
+    if (manual_bounds_popup_ == ManualBoundsPopup::StepConfirm) {
+        // 3 buttons: "Continue" / "Go Back" / "Exit"
+        constexpr int kCount = 3;
+        if (delta != 0) {
+            manual_bounds_popup_sel_ = static_cast<uint8_t>(
+                (manual_bounds_popup_sel_ + delta + kCount) % kCount);
+            playBeep_(1);
+            return;
+        }
+        if (!click) return;
+        playBeep_(2);
+        if (manual_bounds_popup_sel_ == 0) {
+            // Continue → advance to next step
+            if (manual_bounds_step_ == ManualBoundsStep::FixLeftOffset) {
+                // Accept offset → re-zero and proceed to JogFullRange
+                logf_(now_ms, "ManualBounds: offset=%.1f deg, re-zeroing", manual_bounds_fix_offset_deg_);
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsReZero),
+                    nullptr, 0);
+                manual_bounds_popup_ = ManualBoundsPopup::None;
+                manual_bounds_step_ = ManualBoundsStep::JogFullRange;
+                manual_bounds_jog_deg_ = 0.0f;
+                manual_bounds_step_idx_ = 2; // 1.0° default
+            } else if (manual_bounds_step_ == ManualBoundsStep::JogFullRange) {
+                // Accept total range, move motor to left bound (pos 0) for left backoff
+                manual_bounds_total_range_deg_ = manual_bounds_jog_deg_;
+                logf_(now_ms, "ManualBounds: total_range=%.1f deg", manual_bounds_total_range_deg_);
+                float left_pos = 0.0f;
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &left_pos, sizeof(left_pos));
+                manual_bounds_popup_ = ManualBoundsPopup::None;
+                manual_bounds_step_ = ManualBoundsStep::JogLeftBackoff;
+                manual_bounds_left_backoff_deg_ = 0.0f;
+                manual_bounds_step_idx_ = 0; // 0.1° for fine backoff
+            } else if (manual_bounds_step_ == ManualBoundsStep::JogLeftBackoff) {
+                // Accept left backoff, move motor to right bound for right backoff
+                logf_(now_ms, "ManualBounds: left_backoff=%.1f deg", manual_bounds_left_backoff_deg_);
+                float right_pos = manual_bounds_total_range_deg_;
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsJog),
+                    &right_pos, sizeof(right_pos));
+                manual_bounds_popup_ = ManualBoundsPopup::None;
+                manual_bounds_step_ = ManualBoundsStep::JogRightBackoff;
+                manual_bounds_right_backoff_deg_ = 0.0f;
+                manual_bounds_step_idx_ = 0; // 0.1° for fine backoff
+            } else if (manual_bounds_step_ == ManualBoundsStep::JogRightBackoff) {
+                // Accept right backoff, go to summary
+                logf_(now_ms, "ManualBounds: right_backoff=%.1f deg", manual_bounds_right_backoff_deg_);
+                manual_bounds_popup_ = ManualBoundsPopup::None;
+                manual_bounds_step_ = ManualBoundsStep::Summary;
+            }
+        } else if (manual_bounds_popup_sel_ == 1) {
+            // Go Back → return to editing current jog step
+            manual_bounds_popup_ = ManualBoundsPopup::None;
+        } else {
+            // Exit → cancel wizard entirely
+            sendManualBoundsCancel_();
+            manual_bounds_popup_ = ManualBoundsPopup::None;
+            resetManualBoundsWizard_();
+            page_ = Page::Landing;
+        }
+        dirty_ = true;
+        return;
+    }
+
+    // SummaryActions popup: 3 buttons
+    constexpr int kPopupCount = 3; // Confirm & Send, Go Back, Cancel
+    if (delta != 0) {
+        manual_bounds_popup_sel_ = static_cast<uint8_t>(
+            (manual_bounds_popup_sel_ + delta + kPopupCount) % kPopupCount);
+        playBeep_(1);
+        return;
+    }
+    if (!click) return;
+
+    playBeep_(2);
+    switch (manual_bounds_popup_sel_) {
+        case 0: {
+            // Confirm & Send
+            cached_manual_total_range_deg_ = manual_bounds_total_range_deg_;
+            cached_manual_left_backoff_deg_ = manual_bounds_left_backoff_deg_;
+            cached_manual_right_backoff_deg_ = manual_bounds_right_backoff_deg_;
+            manual_bounds_cached_ = true;
+
+            // Persist manual bounds to NVS
+            if (settings_ != nullptr) {
+                settings_->manual_bounds.valid = true;
+                settings_->manual_bounds.total_range_deg = cached_manual_total_range_deg_;
+                settings_->manual_bounds.left_backoff_deg = cached_manual_left_backoff_deg_;
+                settings_->manual_bounds.right_backoff_deg = cached_manual_right_backoff_deg_;
+                (void)SettingsStore::Save(*settings_);
+                logf_(now_ms, "Manual bounds saved to NVS");
+            }
+
+            struct { float total_range; float left_backoff; float right_backoff; } payload;
+            payload.total_range = manual_bounds_total_range_deg_;
+            payload.left_backoff = manual_bounds_left_backoff_deg_;
+            payload.right_backoff = manual_bounds_right_backoff_deg_;
+            (void)espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsConfirm),
+                &payload, sizeof(payload));
+            logf_(now_ms, "ManualBounds: sent range=%.1f L=%.1f R=%.1f",
+                  manual_bounds_total_range_deg_, manual_bounds_left_backoff_deg_,
+                  manual_bounds_right_backoff_deg_);
+            manual_bounds_popup_ = ManualBoundsPopup::None;
+            manual_bounds_step_ = ManualBoundsStep::Done;
+            break;
+        }
+        case 1:
+            // Go Back to JogRightBackoff
+            manual_bounds_popup_ = ManualBoundsPopup::None;
+            manual_bounds_step_ = ManualBoundsStep::JogRightBackoff;
+            break;
+        case 2:
+            // Cancel
+            sendManualBoundsCancel_();
+            manual_bounds_popup_ = ManualBoundsPopup::None;
+            resetManualBoundsWizard_();
+            page_ = Page::Landing;
+            break;
+    }
+    dirty_ = true;
+}
+
+void ui::UiController::drawRadarArmature_(int16_t cx, int16_t cy, float angle_deg,
+                                           float sweep_min_deg, float sweep_max_deg,
+                                           uint32_t now_ms) noexcept
+{
+    (void)now_ms;
+    constexpr float kPi = 3.14159265f;
+    constexpr int16_t kArmLen = 56;
+    constexpr int16_t kRadarR = 68;
+
+    // Radar background: concentric rings + crosshair
+    canvas_->drawCircle(cx, cy, kRadarR, colors::bg_card);
+    canvas_->drawCircle(cx, cy, static_cast<int16_t>(kRadarR * 2 / 3), colors::bg_card);
+    canvas_->drawCircle(cx, cy, static_cast<int16_t>(kRadarR / 3), colors::bg_card);
+    canvas_->drawLine(static_cast<int16_t>(cx - kRadarR), cy, static_cast<int16_t>(cx + kRadarR), cy, colors::bg_card);
+    canvas_->drawLine(cx, static_cast<int16_t>(cy - kRadarR), cx, static_cast<int16_t>(cy + kRadarR), colors::bg_card);
+
+    // Tick marks at -90, -45, 0, 45, 90
+    for (int a = -90; a <= 90; a += 45) {
+        float rad = a * kPi / 180.0f;
+        int16_t tx = static_cast<int16_t>(cx + static_cast<int16_t>((kRadarR - 4) * std::sin(rad)));
+        int16_t ty = static_cast<int16_t>(cy - static_cast<int16_t>((kRadarR - 4) * std::cos(rad)));
+        int16_t ex = static_cast<int16_t>(cx + static_cast<int16_t>((kRadarR + 2) * std::sin(rad)));
+        int16_t ey = static_cast<int16_t>(cy - static_cast<int16_t>((kRadarR + 2) * std::cos(rad)));
+        canvas_->drawLine(tx, ty, ex, ey, colors::text_hint);
+    }
+
+    // Swept arc (filled)
+    if (std::fabs(sweep_max_deg - sweep_min_deg) > 0.5f) {
+        // Convert from armature angle (0°=up) to M5GFX arc (0°=right, CW)
+        float arc_start = -90.0f + sweep_min_deg;
+        float arc_end = -90.0f + sweep_max_deg;
+        if (arc_start > arc_end) { float t = arc_start; arc_start = arc_end; arc_end = t; }
+        canvas_->fillArc(cx, cy, kArmLen, 4, arc_start, arc_end, 0x1A40); // dark orange fill
+    }
+
+    // Armature arm
+    float rad = angle_deg * kPi / 180.0f;
+    int16_t tip_x = static_cast<int16_t>(cx + static_cast<int16_t>(kArmLen * std::sin(rad)));
+    int16_t tip_y = static_cast<int16_t>(cy - static_cast<int16_t>(kArmLen * std::cos(rad)));
+    canvas_->drawWideLine(cx, cy, tip_x, tip_y, 3, colors::text_primary);
+
+    // Pivot and tip
+    canvas_->fillSmoothCircle(cx, cy, 4, colors::bg_elevated);
+    canvas_->drawCircle(cx, cy, 5, colors::bg_card);
+    canvas_->fillSmoothCircle(tip_x, tip_y, 5, colors::accent_orange);
+}
+
+// ─── Manual Bounds Page ─────────────────────────────────────────────────────
+void ui::UiController::drawManualBounds_(uint32_t now_ms) noexcept
+{
+    // Handle popup overlay
+    if (manual_bounds_popup_ != ManualBoundsPopup::None) {
+        drawManualBoundsPopup_(now_ms);
+        return;
+    }
+
+    const int16_t cx = CENTER_X_;
+    const int16_t cy = CENTER_Y_;
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    canvas_->setTextDatum(textdatum_t::top_center);
+    canvas_->setTextSize(1);
+    canvas_->setTextColor(colors::accent_orange);
+    canvas_->drawString("MANUAL BOUNDS", cx, 8);
+
+    // ── Progress dots (9 steps mapped to 7 dots) ────────────────────────────
+    {
+        int step_idx = 0;
+        switch (manual_bounds_step_) {
+            case ManualBoundsStep::StartPrompt:    step_idx = 0; break;
+            case ManualBoundsStep::PlaceLeft:       step_idx = 1; break;
+            case ManualBoundsStep::ConfirmLeft:     step_idx = 1; break;
+            case ManualBoundsStep::FixLeftOffset:   step_idx = 2; break;
+            case ManualBoundsStep::JogFullRange:    step_idx = 3; break;
+            case ManualBoundsStep::JogLeftBackoff:  step_idx = 4; break;
+            case ManualBoundsStep::JogRightBackoff: step_idx = 5; break;
+            case ManualBoundsStep::Summary:         step_idx = 6; break;
+            case ManualBoundsStep::Done:            step_idx = 6; break;
+        }
+        const int total = 7;
+        const int dot_r = 3;
+        const int dot_gap = 14;
+        const int dots_w = (total - 1) * dot_gap;
+        const int16_t dot_y = 24;
+        for (int i = 0; i < total; i++) {
+            int16_t dx = static_cast<int16_t>(cx - dots_w / 2 + i * dot_gap);
+            if (i <= step_idx) {
+                canvas_->fillCircle(dx, dot_y, dot_r, colors::accent_orange);
+            } else {
+                canvas_->drawCircle(dx, dot_y, dot_r, 0x4208);
+            }
+        }
+    }
+
+    // ── Step content ────────────────────────────────────────────────────────
+    switch (manual_bounds_step_) {
+        case ManualBoundsStep::StartPrompt: {
+            // Radar background visualization (idle scanning)
+            const int16_t radar_cy = static_cast<int16_t>(cy - 18);
+            const float t = static_cast<float>((now_ms % 4000U)) / 4000.0f;
+            const float sweep = -45.0f + 90.0f * (0.5f + 0.5f * std::sin(2.0f * 3.14159f * t));
+            drawRadarArmature_(cx, radar_cy, sweep, -45.0f, 45.0f, now_ms);
+
+            // Description above buttons
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::text_secondary);
+            canvas_->drawString("Set bounds by physical", cx, 158);
+            canvas_->drawString("armature placement", cx, 170);
+
+            // Start / Back buttons
+            constexpr int16_t btn_y = 182;
+            constexpr int16_t btn_h = 28;
+            constexpr int16_t btn_gap_px = 8;
+            constexpr int16_t back_btn_w = 70;
+            constexpr int16_t action_btn_w = 100;
+            constexpr int16_t total_w = back_btn_w + btn_gap_px + action_btn_w;
+            const int16_t back_x = static_cast<int16_t>((240 - total_w) / 2);
+            const int16_t action_x = static_cast<int16_t>(back_x + back_btn_w + btn_gap_px);
+            drawModernButton_(back_x, btn_y, back_btn_w, btn_h, "Back",
+                              manual_bounds_focus_ == ManualBoundsFocus::Back, false, colors::accent_orange);
+            drawModernButton_(action_x, btn_y, action_btn_w, btn_h, "Start",
+                              manual_bounds_focus_ == ManualBoundsFocus::Action, false, colors::accent_orange);
+            break;
+        }
+
+        case ManualBoundsStep::PlaceLeft: {
+            // Animated armature being pushed from center to left
+            const int16_t radar_cy = static_cast<int16_t>(cy - 28);
+            const uint32_t elapsed = now_ms - manual_bounds_anim_start_ms_;
+            float arm_angle;
+            if (elapsed < 2000) {
+                float p = static_cast<float>(elapsed) / 2000.0f;
+                p = 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p);
+                arm_angle = -90.0f * p;
+            } else {
+                float pulse = 2.0f * std::sin(static_cast<float>((elapsed - 2000) % 1500) / 1500.0f * 2.0f * 3.14159f);
+                arm_angle = -90.0f + pulse;
+            }
+            drawRadarArmature_(cx, radar_cy, arm_angle, -90.0f, 0.0f, now_ms);
+
+            // Left arrow animation (pulsing) — below radar
+            float pulse_a = 0.5f + 0.5f * std::sin(static_cast<float>(now_ms % 1000) / 1000.0f * 2.0f * 3.14159f);
+            uint16_t arrow_color = (pulse_a > 0.5f) ? colors::accent_orange : 0x7A00;
+            const int16_t arrow_y = static_cast<int16_t>(radar_cy + 72);
+            canvas_->fillTriangle(static_cast<int16_t>(cx - 24), arrow_y,
+                                  static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y - 8),
+                                  static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y + 8), arrow_color);
+            canvas_->fillRect(static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y - 4), 32, 8, arrow_color);
+
+            // Text below arrow — properly spaced
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::accent_yellow);
+            const int16_t text_start_y = static_cast<int16_t>(arrow_y + 18);
+            canvas_->drawString("Motor is OFF", cx, text_start_y);
+            canvas_->setTextColor(colors::accent_orange);
+            canvas_->drawString("Push armature to LEFT stop", cx, static_cast<int16_t>(text_start_y + 14));
+
+            // Hints at bottom
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Continue", cx, 210);
+            canvas_->drawString("[Hold] Cancel", cx, 222);
+            break;
+        }
+
+        case ManualBoundsStep::ConfirmLeft: {
+            // Confirmation screen — keep crosshair high, move UI lower
+            const int16_t radar_cy = static_cast<int16_t>(cy - 36);
+            drawRadarArmature_(cx, radar_cy, -90.0f, -90.0f, 0.0f, now_ms);
+
+            // Question — size 2 for visibility, placed just below radar center
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("At left stop?", cx, static_cast<int16_t>(radar_cy + 56));
+
+            // Buttons — moved up from 174 to 160
+            constexpr int16_t btn_y = 160;
+            constexpr int16_t btn_h = 28;
+            constexpr int16_t btn_gap_px = 10;
+            constexpr int16_t no_btn_w = 66;
+            constexpr int16_t yes_btn_w = 100;
+            constexpr int16_t total_w = no_btn_w + btn_gap_px + yes_btn_w;
+            const int16_t no_x = static_cast<int16_t>((240 - total_w) / 2);
+            const int16_t yes_x = static_cast<int16_t>(no_x + no_btn_w + btn_gap_px);
+            drawModernButton_(no_x, btn_y, no_btn_w, btn_h, "No",
+                              manual_bounds_focus_ == ManualBoundsFocus::Back, false, colors::accent_red);
+            drawModernButton_(yes_x, btn_y, yes_btn_w, btn_h, "Yes",
+                              manual_bounds_focus_ == ManualBoundsFocus::Action, false, colors::accent_green);
+
+            // Hints — two short lines to avoid horizontal clipping
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Select", cx, 198);
+            canvas_->drawString("[Hold] Cancel", cx, 210);
+            break;
+        }
+
+        case ManualBoundsStep::FixLeftOffset: {
+            // Allow user to freely adjust motor position at left stop
+            const int16_t radar_cy = static_cast<int16_t>(cy - 28);
+            // Show armature near -90° shifted by offset (visual scale: 1° offset = ~2° arc)
+            float vis_offset = manual_bounds_fix_offset_deg_;
+            if (vis_offset < -45.0f) vis_offset = -45.0f;
+            if (vis_offset > 45.0f) vis_offset = 45.0f;
+            float arm_angle = -90.0f + vis_offset * 2.0f;
+            drawRadarArmature_(cx, radar_cy, arm_angle, -90.0f, arm_angle, now_ms);
+
+            // Title
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("Fix Motor Offset", cx, 34);
+
+            // Offset readout
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%+.1f", static_cast<double>(manual_bounds_fix_offset_deg_));
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, static_cast<int16_t>(radar_cy + 66));
+
+            // Step size pill
+            canvas_->setTextSize(1);
+            snprintf(buf, sizeof(buf), "Step: %.1f",
+                     static_cast<double>(kManualBoundsStepSizes_[manual_bounds_step_idx_]));
+            int16_t pw = static_cast<int16_t>(canvas_->textWidth(buf)) + 16;
+            const int16_t pill_y = 174;
+            canvas_->fillRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x18E3);
+            canvas_->drawRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x4A69);
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, static_cast<int16_t>(pill_y + 9));
+
+            // Hints
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Set  [Dial] Jog", cx, 198);
+            canvas_->drawString("[Hold] Step", cx, 210);
+            break;
+        }
+
+        case ManualBoundsStep::JogFullRange: {
+            // Radar showing armature from left bound to current jog position
+            const int16_t radar_cy = static_cast<int16_t>(cy - 30);
+            float max_range = 340.0f;
+            float arm_angle = -90.0f + (manual_bounds_jog_deg_ / max_range) * 180.0f;
+            drawRadarArmature_(cx, radar_cy, arm_angle, -90.0f, arm_angle, now_ms);
+
+            // Title
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("Find Right Bound", cx, 34);
+
+            // Big readout with unit — positioned below radar
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(manual_bounds_jog_deg_));
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, static_cast<int16_t>(radar_cy + 66));
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("deg from left stop", cx, static_cast<int16_t>(radar_cy + 82));
+
+            // Step size pill — above hint lines
+            snprintf(buf, sizeof(buf), "Step: %.1f",
+                     static_cast<double>(kManualBoundsStepSizes_[manual_bounds_step_idx_]));
+            int16_t pw = static_cast<int16_t>(canvas_->textWidth(buf)) + 16;
+            const int16_t pill_y = 178;
+            canvas_->fillRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x18E3);
+            canvas_->drawRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x4A69);
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, static_cast<int16_t>(pill_y + 9));
+
+            // Hints — two lines
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Set  [Dial] Jog", cx, 200);
+            canvas_->drawString("[Hold] Step", cx, 212);
+            break;
+        }
+
+        case ManualBoundsStep::JogLeftBackoff: {
+            // Show bounds diagram, user adjusts left edge backoff
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("Left Edge Backoff", cx, 34);
+
+            // Bounds bar showing total range + left backoff position
+            const int16_t bar_y = 62;
+            const int16_t bar_w = 180;
+            const int16_t bar_h = 10;
+            const int16_t bar_x = static_cast<int16_t>(cx - bar_w / 2);
+            float total = manual_bounds_total_range_deg_;
+            float lb = manual_bounds_left_backoff_deg_;
+
+            // Full bar (global bounds)
+            canvas_->fillRoundRect(bar_x, bar_y, bar_w, bar_h, 5, 0x2104);
+            // Global bound ticks (ends)
+            canvas_->fillRect(bar_x, static_cast<int16_t>(bar_y - 4), 3, static_cast<int16_t>(bar_h + 8), colors::accent_red);
+            canvas_->fillRect(static_cast<int16_t>(bar_x + bar_w - 3), static_cast<int16_t>(bar_y - 4), 3, static_cast<int16_t>(bar_h + 8), colors::accent_red);
+
+            // Left backoff indicator (highlighted region from left end)
+            if (total > 0.1f && lb > 0.01f) {
+                float frac_lb = lb / total;
+                if (frac_lb > 0.5f) frac_lb = 0.5f;
+                int16_t lb_w = static_cast<int16_t>(bar_w * frac_lb);
+                if (lb_w > 0) {
+                    canvas_->fillRoundRect(static_cast<int16_t>(bar_x + 2), static_cast<int16_t>(bar_y + 1),
+                                           lb_w, static_cast<int16_t>(bar_h - 2), 3, 0x4208);
+                }
+                // Local left bound tick
+                int16_t tick_x = static_cast<int16_t>(bar_x + lb_w + 2);
+                canvas_->fillRect(tick_x, static_cast<int16_t>(bar_y - 3), 2, static_cast<int16_t>(bar_h + 6), colors::accent_cyan);
+            }
+
+            // Center diamond
+            int16_t center_bar_y = static_cast<int16_t>(bar_y + bar_h / 2);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(center_bar_y - 7),
+                                  static_cast<int16_t>(cx - 5), center_bar_y,
+                                  static_cast<int16_t>(cx + 5), center_bar_y, colors::accent_green);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(center_bar_y + 7),
+                                  static_cast<int16_t>(cx - 5), center_bar_y,
+                                  static_cast<int16_t>(cx + 5), center_bar_y, colors::accent_green);
+
+            // Labels
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("L", static_cast<int16_t>(bar_x + 1), static_cast<int16_t>(bar_y + bar_h + 4));
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("R", static_cast<int16_t>(bar_x + bar_w - 1), static_cast<int16_t>(bar_y + bar_h + 4));
+            canvas_->setTextColor(colors::accent_green);
+            canvas_->drawString("C", cx, static_cast<int16_t>(bar_y + bar_h + 4));
+
+            // Backoff readout (large)
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(lb));
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, 116);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("deg left backoff", cx, 136);
+
+            // Show computed local left bound
+            float half = total / 2.0f;
+            char buf2[48];
+            snprintf(buf2, sizeof(buf2), "Local left: %.1f deg",
+                     static_cast<double>(-(half - lb)));
+            canvas_->setTextColor(colors::accent_cyan);
+            canvas_->drawString(buf2, cx, 158);
+
+            // Step size pill
+            snprintf(buf, sizeof(buf), "Step: %.1f",
+                     static_cast<double>(kManualBoundsStepSizes_[manual_bounds_step_idx_]));
+            int16_t pw = static_cast<int16_t>(canvas_->textWidth(buf)) + 16;
+            canvas_->fillRoundRect(static_cast<int16_t>(cx - pw / 2), 174, pw, 18, 9, 0x18E3);
+            canvas_->drawRoundRect(static_cast<int16_t>(cx - pw / 2), 174, pw, 18, 9, 0x4A69);
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, 183);
+
+            // Hints
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Set  [Dial] Jog", cx, 198);
+            canvas_->drawString("[Hold] Step", cx, 210);
+            break;
+        }
+
+        case ManualBoundsStep::JogRightBackoff: {
+            // Show bounds diagram, user adjusts right edge backoff
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("Right Edge Backoff", cx, 34);
+
+            // Bounds bar showing total range + right backoff position
+            const int16_t bar_y = 62;
+            const int16_t bar_w = 180;
+            const int16_t bar_h = 10;
+            const int16_t bar_x = static_cast<int16_t>(cx - bar_w / 2);
+            float total = manual_bounds_total_range_deg_;
+            float rb = manual_bounds_right_backoff_deg_;
+
+            // Full bar (global bounds)
+            canvas_->fillRoundRect(bar_x, bar_y, bar_w, bar_h, 5, 0x2104);
+            // Global bound ticks (ends)
+            canvas_->fillRect(bar_x, static_cast<int16_t>(bar_y - 4), 3, static_cast<int16_t>(bar_h + 8), colors::accent_red);
+            canvas_->fillRect(static_cast<int16_t>(bar_x + bar_w - 3), static_cast<int16_t>(bar_y - 4), 3, static_cast<int16_t>(bar_h + 8), colors::accent_red);
+
+            // Right backoff indicator (highlighted region from right end)
+            if (total > 0.1f && rb > 0.01f) {
+                float frac_rb = rb / total;
+                if (frac_rb > 0.5f) frac_rb = 0.5f;
+                int16_t rb_w = static_cast<int16_t>(bar_w * frac_rb);
+                if (rb_w > 0) {
+                    int16_t rx = static_cast<int16_t>(bar_x + bar_w - rb_w - 2);
+                    canvas_->fillRoundRect(rx, static_cast<int16_t>(bar_y + 1),
+                                           rb_w, static_cast<int16_t>(bar_h - 2), 3, 0x4208);
+                }
+                // Local right bound tick
+                int16_t tick_x = static_cast<int16_t>(bar_x + bar_w - rb_w - 2);
+                canvas_->fillRect(tick_x, static_cast<int16_t>(bar_y - 3), 2, static_cast<int16_t>(bar_h + 6), colors::accent_cyan);
+            }
+
+            // Center diamond
+            int16_t center_bar_y = static_cast<int16_t>(bar_y + bar_h / 2);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(center_bar_y - 7),
+                                  static_cast<int16_t>(cx - 5), center_bar_y,
+                                  static_cast<int16_t>(cx + 5), center_bar_y, colors::accent_green);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(center_bar_y + 7),
+                                  static_cast<int16_t>(cx - 5), center_bar_y,
+                                  static_cast<int16_t>(cx + 5), center_bar_y, colors::accent_green);
+
+            // Labels
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("L", static_cast<int16_t>(bar_x + 1), static_cast<int16_t>(bar_y + bar_h + 4));
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("R", static_cast<int16_t>(bar_x + bar_w - 1), static_cast<int16_t>(bar_y + bar_h + 4));
+            canvas_->setTextColor(colors::accent_green);
+            canvas_->drawString("C", cx, static_cast<int16_t>(bar_y + bar_h + 4));
+
+            // Backoff readout (large)
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(rb));
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, 116);
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("deg right backoff", cx, 136);
+
+            // Show computed local right bound
+            float half = total / 2.0f;
+            char buf2[48];
+            snprintf(buf2, sizeof(buf2), "Local right: +%.1f deg",
+                     static_cast<double>(half - rb));
+            canvas_->setTextColor(colors::accent_cyan);
+            canvas_->drawString(buf2, cx, 158);
+
+            // Step size pill
+            snprintf(buf, sizeof(buf), "Step: %.1f",
+                     static_cast<double>(kManualBoundsStepSizes_[manual_bounds_step_idx_]));
+            int16_t pw = static_cast<int16_t>(canvas_->textWidth(buf)) + 16;
+            canvas_->fillRoundRect(static_cast<int16_t>(cx - pw / 2), 174, pw, 18, 9, 0x18E3);
+            canvas_->drawRoundRect(static_cast<int16_t>(cx - pw / 2), 174, pw, 18, 9, 0x4A69);
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, cx, 183);
+
+            // Hints
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Set  [Dial] Jog", cx, 198);
+            canvas_->drawString("[Hold] Step", cx, 210);
+            break;
+        }
+
+        case ManualBoundsStep::Summary: {
+            // ── Bounds Summary — clean card-style layout ──
+            float total = manual_bounds_total_range_deg_;
+            float half = total / 2.0f;
+            float lb = manual_bounds_left_backoff_deg_;
+            float rb = manual_bounds_right_backoff_deg_;
+            float local_left = half - lb;
+            float local_right = half - rb;
+            if (local_left < 0.0f) local_left = 0.0f;
+            if (local_right < 0.0f) local_right = 0.0f;
+
+            // Title
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextSize(2);
+            canvas_->setTextColor(colors::accent_green);
+            canvas_->drawString("Summary", cx, 34);
+
+            // Bounds bar visualization
+            const int16_t bar_y = 60;
+            const int16_t bar_w = 190;
+            const int16_t bar_h = 12;
+            const int16_t bar_x = static_cast<int16_t>(cx - bar_w / 2);
+
+            // Dark track
+            canvas_->fillRoundRect(bar_x, bar_y, bar_w, bar_h, 6, 0x2104);
+            // Global end ticks
+            canvas_->fillRect(bar_x, static_cast<int16_t>(bar_y - 3), 3, static_cast<int16_t>(bar_h + 6), colors::accent_red);
+            canvas_->fillRect(static_cast<int16_t>(bar_x + bar_w - 3), static_cast<int16_t>(bar_y - 3), 3, static_cast<int16_t>(bar_h + 6), colors::accent_red);
+            // Local bounds fill (asymmetric)
+            if (total > 0.1f) {
+                float frac_lb = lb / total;
+                float frac_rb = rb / total;
+                if (frac_lb > 0.5f) frac_lb = 0.5f;
+                if (frac_rb > 0.5f) frac_rb = 0.5f;
+                int16_t left_inset = static_cast<int16_t>(bar_w * frac_lb);
+                int16_t right_inset = static_cast<int16_t>(bar_w * frac_rb);
+                int16_t lx = static_cast<int16_t>(bar_x + left_inset + 3);
+                int16_t lw = static_cast<int16_t>(bar_w - left_inset - right_inset - 6);
+                if (lw > 0) {
+                    canvas_->fillRoundRect(lx, static_cast<int16_t>(bar_y + 2),
+                                           lw, static_cast<int16_t>(bar_h - 4), 3, colors::accent_blue);
+                    // Local bound ticks
+                    canvas_->fillRect(lx, static_cast<int16_t>(bar_y - 2), 2, static_cast<int16_t>(bar_h + 4), colors::accent_cyan);
+                    canvas_->fillRect(static_cast<int16_t>(lx + lw - 2), static_cast<int16_t>(bar_y - 2), 2, static_cast<int16_t>(bar_h + 4), colors::accent_cyan);
+                }
+            }
+            // Center diamond
+            int16_t cby = static_cast<int16_t>(bar_y + bar_h / 2);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(cby - 6), static_cast<int16_t>(cx - 4), cby, static_cast<int16_t>(cx + 4), cby, colors::accent_green);
+            canvas_->fillTriangle(cx, static_cast<int16_t>(cby + 6), static_cast<int16_t>(cx - 4), cby, static_cast<int16_t>(cx + 4), cby, colors::accent_green);
+
+            // Legend labels under bar
+            canvas_->setTextSize(1);
+            canvas_->setTextDatum(textdatum_t::top_center);
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("Global", static_cast<int16_t>(bar_x + 14), static_cast<int16_t>(bar_y + bar_h + 3));
+            canvas_->setTextColor(colors::accent_green);
+            canvas_->drawString("C", cx, static_cast<int16_t>(bar_y + bar_h + 3));
+            canvas_->setTextColor(colors::accent_cyan);
+            canvas_->drawString("Local", static_cast<int16_t>(bar_x + bar_w - 14), static_cast<int16_t>(bar_y + bar_h + 3));
+
+            // ── Stats cards — 4 rows ──
+            char buf[48];
+            canvas_->setTextSize(1);
+            const int16_t card_x = 28;
+            const int16_t card_w = 184;
+
+            // Row 1: Total Range
+            int16_t ry = 96;
+            canvas_->drawLine(card_x, ry, static_cast<int16_t>(card_x + card_w), ry, 0x2945);
+            ry = static_cast<int16_t>(ry + 5);
+
+            canvas_->setTextDatum(textdatum_t::middle_left);
+            canvas_->setTextColor(colors::text_secondary);
+            canvas_->drawString("Total Range", card_x, static_cast<int16_t>(ry + 7));
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(total));
+            canvas_->setTextDatum(textdatum_t::middle_right);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString(buf, static_cast<int16_t>(card_x + card_w), static_cast<int16_t>(ry + 7));
+
+            // Row 2: Global bounds
+            ry = static_cast<int16_t>(ry + 18);
+            canvas_->drawLine(card_x, ry, static_cast<int16_t>(card_x + card_w), ry, 0x2945);
+            ry = static_cast<int16_t>(ry + 5);
+
+            canvas_->setTextDatum(textdatum_t::middle_left);
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString("Global", card_x, static_cast<int16_t>(ry + 7));
+            snprintf(buf, sizeof(buf), "-%.1f to +%.1f deg",
+                     static_cast<double>(half), static_cast<double>(half));
+            canvas_->setTextDatum(textdatum_t::middle_right);
+            canvas_->setTextColor(colors::accent_red);
+            canvas_->drawString(buf, static_cast<int16_t>(card_x + card_w), static_cast<int16_t>(ry + 7));
+
+            // Row 3: Left / Right backoff
+            ry = static_cast<int16_t>(ry + 18);
+            canvas_->drawLine(card_x, ry, static_cast<int16_t>(card_x + card_w), ry, 0x2945);
+            ry = static_cast<int16_t>(ry + 5);
+
+            canvas_->setTextDatum(textdatum_t::middle_left);
+            canvas_->setTextColor(colors::text_secondary);
+            canvas_->drawString("Backoff L", card_x, static_cast<int16_t>(ry + 7));
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(lb));
+            canvas_->setTextDatum(textdatum_t::middle_right);
+            canvas_->setTextColor(colors::accent_cyan);
+            canvas_->drawString(buf, static_cast<int16_t>(card_x + card_w / 2 - 4), static_cast<int16_t>(ry + 7));
+
+            canvas_->setTextDatum(textdatum_t::middle_left);
+            canvas_->setTextColor(colors::text_secondary);
+            canvas_->drawString("R", static_cast<int16_t>(cx + 4), static_cast<int16_t>(ry + 7));
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(rb));
+            canvas_->setTextDatum(textdatum_t::middle_right);
+            canvas_->setTextColor(colors::accent_cyan);
+            canvas_->drawString(buf, static_cast<int16_t>(card_x + card_w), static_cast<int16_t>(ry + 7));
+
+            // Row 4: Local bounds
+            ry = static_cast<int16_t>(ry + 18);
+            canvas_->drawLine(card_x, ry, static_cast<int16_t>(card_x + card_w), ry, 0x2945);
+            ry = static_cast<int16_t>(ry + 5);
+
+            canvas_->setTextDatum(textdatum_t::middle_left);
+            canvas_->setTextColor(colors::text_secondary);
+            canvas_->drawString("Local", card_x, static_cast<int16_t>(ry + 7));
+            snprintf(buf, sizeof(buf), "-%.1f to +%.1f deg",
+                     static_cast<double>(local_left), static_cast<double>(local_right));
+            canvas_->setTextDatum(textdatum_t::middle_right);
+            canvas_->setTextColor(colors::accent_blue);
+            canvas_->drawString(buf, static_cast<int16_t>(card_x + card_w), static_cast<int16_t>(ry + 7));
+
+            // Bottom separator
+            ry = static_cast<int16_t>(ry + 18);
+            canvas_->drawLine(card_x, ry, static_cast<int16_t>(card_x + card_w), ry, 0x2945);
+
+            // Hint
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString("[Press] Actions  [Hold] Back", cx, 222);
+            break;
+        }
+
+        case ManualBoundsStep::Done: {
+            // Success checkmark
+            canvas_->setTextDatum(textdatum_t::middle_center);
+            for (int i = -1; i <= 1; i++) {
+                canvas_->drawLine(static_cast<int16_t>(cx - 20), static_cast<int16_t>(cy - 12 + i),
+                                  static_cast<int16_t>(cx - 5), static_cast<int16_t>(cy + 8 + i), colors::accent_green);
+                canvas_->drawLine(static_cast<int16_t>(cx - 5), static_cast<int16_t>(cy + 8 + i),
+                                  static_cast<int16_t>(cx + 25), static_cast<int16_t>(cy - 22 + i), colors::accent_green);
+            }
+
+            canvas_->setTextSize(1);
+            canvas_->setTextColor(TFT_WHITE);
+            canvas_->drawString("Bounds Applied!", cx, static_cast<int16_t>(cy + 34));
+
+            char buf[48];
+            snprintf(buf, sizeof(buf), "Range: %.1f  L: %.1f  R: %.1f",
+                     static_cast<double>(cached_manual_total_range_deg_),
+                     static_cast<double>(cached_manual_left_backoff_deg_),
+                     static_cast<double>(cached_manual_right_backoff_deg_));
+            canvas_->setTextColor(colors::text_hint);
+            canvas_->drawString(buf, cx, static_cast<int16_t>(cy + 52));
+
+            canvas_->drawString("[Press] Back to Menu", cx, 216);
+            break;
+        }
+    }
+
+    // Connection indicator (top-right)
+    th::drawConnectionDot(240 - 18, 18, conn_status_ == ConnStatus::Connected, now_ms);
+}
+
+void ui::UiController::drawManualBoundsPopup_(uint32_t now_ms) noexcept
+{
+    (void)now_ms;
+    const int16_t cx = CENTER_X_;
+    const int16_t cy = CENTER_Y_;
+
+    if (manual_bounds_popup_ == ManualBoundsPopup::StepConfirm) {
+        // Universal step confirm popup: Continue / Go Back / Exit
+        const int16_t popup_w = 200;
+        const int16_t popup_h = 160;
+        const int16_t popup_x = static_cast<int16_t>(cx - popup_w / 2);
+        const int16_t popup_y = static_cast<int16_t>(cy - popup_h / 2);
+
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, 0x2104, true);
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, colors::accent_orange, false);
+
+        // Title — context-dependent
+        canvas_->setTextSize(2);
+        canvas_->setTextDatum(textdatum_t::top_center);
+        canvas_->setTextColor(TFT_WHITE);
+        const char* title = "Confirm?";
+        if (manual_bounds_step_ == ManualBoundsStep::FixLeftOffset)   title = "Offset OK?";
+        if (manual_bounds_step_ == ManualBoundsStep::JogFullRange)    title = "Set Range?";
+        if (manual_bounds_step_ == ManualBoundsStep::JogLeftBackoff)  title = "Left OK?";
+        if (manual_bounds_step_ == ManualBoundsStep::JogRightBackoff) title = "Right OK?";
+        canvas_->drawString(title, cx, static_cast<int16_t>(popup_y + 10));
+
+        // Value readout
+        char buf[32];
+        if (manual_bounds_step_ == ManualBoundsStep::FixLeftOffset) {
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(manual_bounds_fix_offset_deg_));
+        } else if (manual_bounds_step_ == ManualBoundsStep::JogFullRange) {
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(manual_bounds_jog_deg_));
+        } else if (manual_bounds_step_ == ManualBoundsStep::JogLeftBackoff) {
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(manual_bounds_left_backoff_deg_));
+        } else {
+            snprintf(buf, sizeof(buf), "%.1f deg", static_cast<double>(manual_bounds_right_backoff_deg_));
+        }
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->drawString(buf, cx, static_cast<int16_t>(popup_y + 36));
+
+        // 3 buttons: Continue / Go Back / Exit
+        constexpr int16_t btn_w = 170;
+        constexpr int16_t btn_h = 28;
+        const int16_t btn_x = static_cast<int16_t>(cx - btn_w / 2);
+        int16_t y = static_cast<int16_t>(popup_y + 52);
+
+        const char* labels[] = { "Continue", "Go Back", "Exit" };
+        uint16_t btn_colors[] = { colors::accent_green, colors::accent_blue, colors::accent_red };
+
+        for (int i = 0; i < 3; i++) {
+            bool sel = (manual_bounds_popup_sel_ == static_cast<uint8_t>(i));
+            drawModernButton_(btn_x, y, btn_w, btn_h, labels[i], sel, false, btn_colors[i]);
+            y = static_cast<int16_t>(y + btn_h + 4);
+        }
+        return;
+    }
+
+    // SummaryActions popup: 3 buttons
+    const int16_t popup_w = 200;
+    const int16_t popup_h = 160;
+    const int16_t popup_x = static_cast<int16_t>(cx - popup_w / 2);
+    const int16_t popup_y = static_cast<int16_t>(cy - popup_h / 2);
+
+    drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, 0x2104, true);
+    drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, colors::accent_orange, false);
+
+    // Title
+    canvas_->setTextSize(2);
+    canvas_->setTextDatum(textdatum_t::top_center);
+    canvas_->setTextColor(TFT_WHITE);
+    canvas_->drawString("Apply?", cx, static_cast<int16_t>(popup_y + 12));
+
+    // 3 buttons: Confirm & Send / Go Back / Cancel
+    constexpr int16_t btn_w = 170;
+    constexpr int16_t btn_h = 28;
+    const int16_t btn_x = static_cast<int16_t>(cx - btn_w / 2);
+    int16_t y = static_cast<int16_t>(popup_y + 44);
+
+    const char* labels[] = { "Confirm & Send", "Go Back", "Cancel" };
+    uint16_t btn_colors[] = { colors::accent_green, colors::accent_blue, colors::accent_red };
+
+    for (int i = 0; i < 3; i++) {
+        bool sel = (manual_bounds_popup_sel_ == static_cast<uint8_t>(i));
+        drawModernButton_(btn_x, y, btn_w, btn_h, labels[i], sel, false, btn_colors[i]);
+        y = static_cast<int16_t>(y + btn_h + 6);
+    }
+}
+
 void ui::UiController::drawLiveCounter_(uint32_t now_ms) noexcept
 {
     // Check if popup is active
@@ -3110,10 +4426,192 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
 {
     (void)now_ms;
     
-    // Semi-transparent overlay effect
     const int16_t cx = 240 / 2;
     const int16_t cy = 240 / 2;
     
+    // ── ManualStartPlace: full-screen — place arm at left stop ─────────────
+    if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
+        // Dark overlay
+        canvas_->fillScreen(colors::bg_primary);
+        canvas_->drawCircle(cx, cy, 118, colors::bg_elevated);
+
+        // Large arrow icon pointing left + pulsing
+        float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(now_ms % 1000) / 1000.0f * 6.283f);
+        uint16_t arrow_color = (pulse > 0.5f) ? colors::accent_orange : 0x7A00;
+        const int16_t arrow_y = 82;
+        canvas_->fillTriangle(static_cast<int16_t>(cx - 24), arrow_y,
+                              static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y - 10),
+                              static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y + 10), arrow_color);
+        canvas_->fillRect(static_cast<int16_t>(cx - 8), static_cast<int16_t>(arrow_y - 5), 32, 10, arrow_color);
+
+        // Instructions
+        canvas_->setTextDatum(textdatum_t::middle_center);
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::accent_yellow);
+        canvas_->drawString("Motor is OFF", cx, 104);
+        canvas_->setTextColor(colors::accent_orange);
+        canvas_->drawString("Place arm at LEFT stop", cx, 118);
+
+        // Show both saved bounds sets
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->drawString("Saved Bounds:", cx, 136);
+
+        char buf[48];
+        if (manual_bounds_cached_) {
+            snprintf(buf, sizeof(buf), "Man: R=%.1f L=%.1f R=%.1f",
+                     static_cast<double>(cached_manual_total_range_deg_),
+                     static_cast<double>(cached_manual_left_backoff_deg_),
+                     static_cast<double>(cached_manual_right_backoff_deg_));
+            canvas_->setTextColor(colors::accent_green);
+        } else {
+            snprintf(buf, sizeof(buf), "Man: --");
+            canvas_->setTextColor(colors::text_hint);
+        }
+        canvas_->drawString(buf, cx, 150);
+
+        if (auto_bounds_cached_) {
+            snprintf(buf, sizeof(buf), "Auto: R=%.1f L=%.1f R=%.1f",
+                     static_cast<double>(cached_auto_total_range_deg_),
+                     static_cast<double>(cached_auto_left_backoff_deg_),
+                     static_cast<double>(cached_auto_right_backoff_deg_));
+            canvas_->setTextColor(colors::accent_cyan);
+        } else {
+            snprintf(buf, sizeof(buf), "Auto: --");
+            canvas_->setTextColor(colors::text_hint);
+        }
+        canvas_->drawString(buf, cx, 164);
+
+        // Hints
+        canvas_->setTextColor(colors::text_hint);
+        canvas_->drawString("[Press] Continue", cx, 200);
+        canvas_->drawString("[Hold] Cancel", cx, 214);
+        return;
+    }
+
+    // ── ManualStartChoice: 3-button popup (Manual Bounds / Auto Bounds / Cancel) ──
+    if (live_popup_mode_ == LivePopupMode::ManualStartChoice) {
+        const int16_t popup_w = 200;
+        const int16_t popup_h = 160;
+        const int16_t popup_x = static_cast<int16_t>(cx - popup_w / 2);
+        const int16_t popup_y = static_cast<int16_t>(cy - popup_h / 2);
+
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, 0x2104, true);
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, colors::accent_orange, false);
+
+        // Title
+        canvas_->setTextSize(2);
+        canvas_->setTextDatum(textdatum_t::top_center);
+        canvas_->setTextColor(TFT_WHITE);
+        canvas_->drawString("Use Bounds", cx, static_cast<int16_t>(popup_y + 10));
+
+        // 3 buttons — grey out unavailable options
+        constexpr int16_t btn_w = 170;
+        constexpr int16_t btn_h = 28;
+        const int16_t btn_x = static_cast<int16_t>(cx - btn_w / 2);
+        int16_t y = static_cast<int16_t>(popup_y + 44);
+
+        const char* labels[] = { "Manual Bounds", "Auto Bounds", "Cancel" };
+        uint16_t btn_colors[] = { colors::accent_green, colors::accent_cyan, colors::accent_red };
+        const bool available[] = { manual_bounds_cached_, auto_bounds_cached_, true };
+        for (int i = 0; i < 3; i++) {
+            bool sel = (live_popup_selection_ == static_cast<uint8_t>(i));
+            if (!available[i]) {
+                // Grey out unavailable option
+                drawModernButton_(btn_x, y, btn_w, btn_h, labels[i], false, false, colors::text_hint);
+            } else {
+                drawModernButton_(btn_x, y, btn_w, btn_h, labels[i], sel, false, btn_colors[i]);
+            }
+            y = static_cast<int16_t>(y + btn_h + 4);
+        }
+        return;
+    }
+
+    // ── ManualRealign: encoder-based offset adjustment screen ────────────
+    if (live_popup_mode_ == LivePopupMode::ManualRealign) {
+        canvas_->fillScreen(colors::bg_primary);
+        canvas_->drawCircle(cx, cy, 118, colors::bg_elevated);
+
+        // Radar showing armature — free movement, visual scale clamped
+        const int16_t radar_cy = static_cast<int16_t>(cy - 30);
+        float vis_offset = realign_offset_deg_;
+        if (vis_offset < -45.0f) vis_offset = -45.0f;
+        if (vis_offset > 45.0f) vis_offset = 45.0f;
+        float arm_angle = -90.0f + vis_offset * 2.0f;
+        drawRadarArmature_(cx, radar_cy, arm_angle, -90.0f, arm_angle, now_ms);
+
+        // Title
+        canvas_->setTextDatum(textdatum_t::top_center);
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(TFT_WHITE);
+        canvas_->drawString("Manual Realign", cx, 34);
+
+        // Offset readout (negative only: -3.6..0)
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(realign_offset_deg_));
+        canvas_->setTextDatum(textdatum_t::middle_center);
+        canvas_->setTextSize(2);
+        canvas_->setTextColor(TFT_WHITE);
+        canvas_->drawString(buf, cx, static_cast<int16_t>(radar_cy + 72));
+
+        // Step size pill
+        canvas_->setTextSize(1);
+        snprintf(buf, sizeof(buf), "Step: %.1f",
+                 static_cast<double>(kManualBoundsStepSizes_[realign_step_idx_]));
+        int16_t pw = static_cast<int16_t>(canvas_->textWidth(buf)) + 16;
+        const int16_t pill_y = 178;
+        canvas_->fillRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x18E3);
+        canvas_->drawRoundRect(static_cast<int16_t>(cx - pw / 2), pill_y, pw, 18, 9, 0x4A69);
+        canvas_->setTextDatum(textdatum_t::middle_center);
+        canvas_->setTextColor(TFT_WHITE);
+        canvas_->drawString(buf, cx, static_cast<int16_t>(pill_y + 9));
+
+        // Hints
+        canvas_->setTextColor(colors::text_hint);
+        canvas_->drawString("[Press] Accept  [Dial] Jog", cx, 200);
+        canvas_->drawString("[Hold] Step", cx, 212);
+        return;
+    }
+
+    // ── ManualRealignConfirm: Continue / Go Back / Cancel popup ─────────
+    if (live_popup_mode_ == LivePopupMode::ManualRealignConfirm) {
+        const int16_t popup_w = 200;
+        const int16_t popup_h = 160;
+        const int16_t popup_x = static_cast<int16_t>(cx - popup_w / 2);
+        const int16_t popup_y = static_cast<int16_t>(cy - popup_h / 2);
+
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, 0x2104, true);
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, colors::accent_cyan, false);
+
+        // Title
+        canvas_->setTextSize(2);
+        canvas_->setTextDatum(textdatum_t::top_center);
+        canvas_->setTextColor(TFT_WHITE);
+        canvas_->drawString("Confirm", cx, static_cast<int16_t>(popup_y + 10));
+
+        // Offset summary
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Offset: %.1f deg", static_cast<double>(realign_offset_deg_));
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->drawString(buf, cx, static_cast<int16_t>(popup_y + 34));
+
+        // 3 buttons
+        constexpr int16_t btn_w = 170;
+        constexpr int16_t btn_h = 28;
+        const int16_t btn_x = static_cast<int16_t>(cx - btn_w / 2);
+        int16_t y = static_cast<int16_t>(popup_y + 52);
+
+        const char* labels[] = { "Continue", "Go Back", "Cancel" };
+        uint16_t btn_colors[] = { colors::accent_green, colors::accent_cyan, colors::accent_red };
+        for (int i = 0; i < 3; i++) {
+            bool sel = (live_popup_selection_ == static_cast<uint8_t>(i));
+            drawModernButton_(btn_x, y, btn_w, btn_h, labels[i], sel, false, btn_colors[i]);
+            y = static_cast<int16_t>(y + btn_h + 4);
+        }
+        return;
+    }
+
+    // ── Standard popup overlay ───────────────────────────────────────────
     // Popup background
     const int16_t popup_w = 200;
     const int16_t popup_h = 140;
@@ -3129,10 +4627,11 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
     const char* title = "Actions";
     if (live_popup_mode_ == LivePopupMode::StartConfirm) {
         title = "Start Test?";
+    } else if (live_popup_mode_ == LivePopupMode::BoundsChoice) {
+        title = "Bounds?";
     }
-    const int16_t title_w = static_cast<int16_t>(canvas_->textWidth(title));
-    canvas_->setCursor(cx - title_w / 2, popup_y + 14);
-    canvas_->print(title);
+    canvas_->setTextDatum(textdatum_t::top_center);
+    canvas_->drawString(title, cx, static_cast<int16_t>(popup_y + 14));
     
     // Buttons based on mode
     const int16_t btn_w = 80;
@@ -3150,6 +4649,22 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
         drawButton_(cancel_btn, "Cancel", live_popup_selection_ == 0, false);
         drawActionButton_(btn_x2, btn_y1, btn_w, btn_h, "Start", 
                          live_popup_selection_ == 1, colors::accent_green, false);
+
+    } else if (live_popup_mode_ == LivePopupMode::BoundsChoice) {
+        // Three buttons: Cancel / Use Manual / Auto Find
+        const int16_t btn_spacing = 8;
+        const int16_t total_w = btn_w * 2 + btn_spacing;
+        const int16_t btn_x1 = cx - total_w / 2;
+        const int16_t btn_x2 = btn_x1 + btn_w + btn_spacing;
+        const int16_t auto_x = cx - btn_w / 2;
+
+        const Rect cancel_btn{btn_x1, btn_y1, btn_w, btn_h};
+
+        drawButton_(cancel_btn, "Cancel", live_popup_selection_ == 0, false);
+        drawActionButton_(btn_x2, btn_y1, btn_w, btn_h, "Manual",
+                         live_popup_selection_ == 1, colors::accent_cyan, false);
+        drawActionButton_(auto_x, btn_y2, btn_w, btn_h, "Auto",
+                         live_popup_selection_ == 2, colors::accent_orange, false);
         
     } else if (live_popup_mode_ == LivePopupMode::RunningActions) {
         // Three buttons: Back / Pause / Stop
@@ -3187,7 +4702,152 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
 
 void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now_ms) noexcept
 {
-    const int max_sel = (live_popup_mode_ == LivePopupMode::StartConfirm) ? 1 : 2;
+    // ManualStartPlace: press → transition to ManualStartChoice
+    // (ManualBoundsStart already sent by the unified restart flow or original BoundsChoice path)
+    if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
+        if (!click) return;
+        playBeep_(2);
+        // Default to first available bounds option
+        if (manual_bounds_cached_) {
+            live_popup_selection_ = 0;
+        } else if (auto_bounds_cached_) {
+            live_popup_selection_ = 1;
+        } else {
+            live_popup_selection_ = 2;  // Cancel only
+        }
+        live_popup_mode_ = LivePopupMode::ManualStartChoice;
+        dirty_ = true;
+        return;
+    }
+
+    // ManualStartChoice: 3-button choice (Manual Bounds / Auto Bounds / Cancel)
+    if (live_popup_mode_ == LivePopupMode::ManualStartChoice) {
+        constexpr int kCount = 3;
+        if (delta != 0) {
+            live_popup_selection_ = static_cast<uint8_t>(
+                (live_popup_selection_ + delta + kCount) % kCount);
+            playBeep_(1);
+            dirty_ = true;
+            return;
+        }
+        if (!click) return;
+
+        const bool available[] = { manual_bounds_cached_, auto_bounds_cached_, true };
+        if (!available[live_popup_selection_]) {
+            // Selected unavailable option — beep and ignore
+            playBeep_(0);
+            dirty_ = true;
+            return;
+        }
+
+        playBeep_(2);
+        if (live_popup_selection_ == 0) {
+            // Use Manual Bounds → manual alignment flow
+            use_auto_bounds_for_restart_ = false;
+            (void)espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsArmPlaced),
+                nullptr, 0);
+            logf_(now_ms, "TX: ManualBoundsArmPlaced (manual bounds)");
+            realign_offset_deg_ = 0.0f;
+            realign_step_idx_ = 0;
+            realign_jog_send_ms_ = 0;
+            live_popup_mode_ = LivePopupMode::ManualRealign;
+        } else if (live_popup_selection_ == 1) {
+            // Use Auto Bounds → manual alignment flow (same, but sends auto bounds at end)
+            use_auto_bounds_for_restart_ = true;
+            (void)espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsArmPlaced),
+                nullptr, 0);
+            logf_(now_ms, "TX: ManualBoundsArmPlaced (auto bounds)");
+            realign_offset_deg_ = 0.0f;
+            realign_step_idx_ = 0;
+            realign_jog_send_ms_ = 0;
+            live_popup_mode_ = LivePopupMode::ManualRealign;
+        } else {
+            // Cancel → exit back to landing page
+            live_popup_mode_ = LivePopupMode::None;
+            page_ = Page::Landing;
+        }
+        dirty_ = true;
+        return;
+    }
+
+    // ManualRealign: encoder-based offset adjustment (rotation handled separately)
+    if (live_popup_mode_ == LivePopupMode::ManualRealign) {
+        // Click = show confirmation popup
+        if (!click) return;
+        playBeep_(2);
+        live_popup_selection_ = 0;
+        live_popup_mode_ = LivePopupMode::ManualRealignConfirm;
+        dirty_ = true;
+        return;
+    }
+
+    // ManualRealignConfirm: Continue / Go Back / Cancel
+    if (live_popup_mode_ == LivePopupMode::ManualRealignConfirm) {
+        constexpr int kCount = 3;
+        if (delta != 0) {
+            live_popup_selection_ = static_cast<uint8_t>(
+                (live_popup_selection_ + delta + kCount) % kCount);
+            playBeep_(1);
+            dirty_ = true;
+            return;
+        }
+        if (!click) return;
+        playBeep_(2);
+        if (live_popup_selection_ == 0) {
+            // Continue → re-zero and start test using selected bounds
+            (void)espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsReZero),
+                nullptr, 0);
+            struct { float total_range; float left_backoff; float right_backoff; } payload;
+            if (use_auto_bounds_for_restart_) {
+                payload.total_range = cached_auto_total_range_deg_;
+                payload.left_backoff = cached_auto_left_backoff_deg_;
+                payload.right_backoff = cached_auto_right_backoff_deg_;
+            } else {
+                payload.total_range = cached_manual_total_range_deg_;
+                payload.left_backoff = cached_manual_left_backoff_deg_;
+                payload.right_backoff = cached_manual_right_backoff_deg_;
+            }
+            const bool ok = espnow::SendCommand(
+                fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                static_cast<uint8_t>(fatigue_proto::CommandId::StartWithManualRealign),
+                &payload, sizeof(payload));
+            if (ok) {
+                pending_command_id_ = 1;
+                pending_command_tick_ = now_ms;
+                logf_(now_ms, "TX: StartWithManualRealign (%s) offs=%.1f r=%.1f l=%.1f r=%.1f",
+                      use_auto_bounds_for_restart_ ? "auto" : "manual",
+                      realign_offset_deg_,
+                      payload.total_range, payload.left_backoff, payload.right_backoff);
+            } else {
+                logf_(now_ms, "TX: StartWithManualRealign FAILED");
+            }
+            live_popup_mode_ = LivePopupMode::None;
+        } else if (live_popup_selection_ == 1) {
+            // Go Back → return to ManualRealign
+            live_popup_mode_ = LivePopupMode::ManualRealign;
+        } else {
+            // Cancel → exit back to landing page
+            live_popup_mode_ = LivePopupMode::None;
+            page_ = Page::Landing;
+        }
+        dirty_ = true;
+        return;
+    }
+
+    int max_sel;
+    if (live_popup_mode_ == LivePopupMode::StartConfirm) {
+        max_sel = 1;
+    } else if (live_popup_mode_ == LivePopupMode::BoundsChoice) {
+        max_sel = 2;  // Cancel(0) / Use Manual(1) / Auto Find(2)
+    } else {
+        max_sel = 2;
+    }
     
     if (delta != 0) {
         if (delta > 0) {
@@ -3221,6 +4881,31 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
                     logf_(now_ms, "TX: Start cmd FAILED");
                 }
                 live_popup_mode_ = LivePopupMode::None;
+            }
+        } else if (live_popup_mode_ == LivePopupMode::BoundsChoice) {
+            if (live_popup_selection_ == 0) {
+                // Cancel
+                live_popup_mode_ = LivePopupMode::None;
+            } else if (live_popup_selection_ == 1) {
+                // Use Manual — send ManualBoundsStart, then show placement screen
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsStart),
+                    nullptr, 0);
+                logf_(now_ms, "TX: ManualBoundsStart (BoundsChoice manual)");
+                live_popup_mode_ = LivePopupMode::ManualStartPlace;
+                dirty_ = true;
+                return;  // don't close
+            } else {
+                // Auto — also go through placement screen (unified left-align flow)
+                (void)espnow::SendCommand(
+                    fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+                    static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsStart),
+                    nullptr, 0);
+                logf_(now_ms, "TX: ManualBoundsStart (BoundsChoice auto)");
+                live_popup_mode_ = LivePopupMode::ManualStartPlace;
+                dirty_ = true;
+                return;  // don't close
             }
         } else if (live_popup_mode_ == LivePopupMode::RunningActions) {
             if (live_popup_selection_ == 0) {
