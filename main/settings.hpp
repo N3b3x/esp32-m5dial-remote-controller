@@ -55,8 +55,8 @@ struct ManualBoundsSettings {
 struct AutoBoundsSettings {
     bool     valid = false;                           ///< true once auto bounds have been found at least once
     float    total_range_deg = 0.0f;                  ///< Full travel found by StallGuard (global_max - global_min)
-    float    left_backoff_deg = 3.6f;                 ///< Left backoff from auto-found bound (default 2 full steps)
-    float    right_backoff_deg = 3.6f;                ///< Right backoff from auto-found bound (default 2 full steps)
+    float    left_backoff_deg = 0.3f;                 ///< Left backoff from auto-found bound (default 0.3 deg)
+    float    right_backoff_deg = 0.3f;                ///< Right backoff from auto-found bound (default 0.3 deg)
 };
 
 /**

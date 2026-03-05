@@ -69,6 +69,16 @@ struct ConfigPayload {
 
     // Extended v2 field (optional, 1 byte)
     int8_t stallguard_sgt;                     ///< StallGuard threshold (SGT). Valid range [-64, 63]. 127 = use test unit default
+
+    // Extended v3 fields (optional, 26 bytes) — persistent bounds from unit NVS
+    uint8_t manual_bounds_valid;               ///< 1 if manual bounds stored on unit
+    float   manual_total_range_deg;            ///< Manual bounds total travel (degrees)
+    float   manual_left_backoff_deg;           ///< Manual left backoff (degrees)
+    float   manual_right_backoff_deg;          ///< Manual right backoff (degrees)
+    uint8_t auto_bounds_valid;                 ///< 1 if auto bounds stored on unit
+    float   auto_total_range_deg;              ///< Auto bounds total travel (degrees)
+    float   auto_left_backoff_deg;             ///< Auto left backoff (degrees)
+    float   auto_right_backoff_deg;            ///< Auto right backoff (degrees)
 };
 
 /**
@@ -99,6 +109,7 @@ struct BoundsResultPayload {
 static constexpr size_t CONFIG_BASE_SIZE_ = 17;              ///< Base fields size (17 bytes)
 static constexpr size_t CONFIG_EXTENDED_V1_SIZE_ = 33;      ///< Extended v1 size (33 bytes)
 static constexpr size_t CONFIG_EXTENDED_V2_SIZE_ = 34;      ///< Extended v2 size (34 bytes, + SGT)
+static constexpr size_t CONFIG_EXTENDED_V3_SIZE_ = sizeof(ConfigPayload); ///< Extended v3 size (v2 + bounds)
 static constexpr size_t CONFIG_EXTENDED_SIZE_ = sizeof(ConfigPayload);  ///< Full extended size
 
 /**
@@ -120,6 +131,16 @@ inline ConfigPayload BuildConfigPayload(const Settings& settings) noexcept
     p.stall_detection_current_factor = settings.test_unit.stall_detection_current_factor;
     p.bounds_search_accel_rev_s2 = settings.test_unit.bounds_search_accel_rev_s2;
     p.stallguard_sgt = settings.test_unit.stallguard_sgt;
+
+    // v3: include cached bounds so ConfigSet syncs edits to unit
+    p.manual_bounds_valid = settings.manual_bounds.valid ? 1 : 0;
+    p.manual_total_range_deg = settings.manual_bounds.total_range_deg;
+    p.manual_left_backoff_deg = settings.manual_bounds.left_backoff_deg;
+    p.manual_right_backoff_deg = settings.manual_bounds.right_backoff_deg;
+    p.auto_bounds_valid = settings.auto_bounds.valid ? 1 : 0;
+    p.auto_total_range_deg = settings.auto_bounds.total_range_deg;
+    p.auto_left_backoff_deg = settings.auto_bounds.left_backoff_deg;
+    p.auto_right_backoff_deg = settings.auto_bounds.right_backoff_deg;
     return p;
 }
 
@@ -182,6 +203,29 @@ inline bool ParseConfig(const uint8_t* payload, size_t len, ConfigPayload& out) 
 
     if (len >= CONFIG_EXTENDED_V2_SIZE_) {
         std::memcpy(&out.stallguard_sgt, payload + 33, 1);
+    }
+
+    // v3 defaults
+    out.manual_bounds_valid = 0;
+    out.manual_total_range_deg = 0.0f;
+    out.manual_left_backoff_deg = 0.0f;
+    out.manual_right_backoff_deg = 0.0f;
+    out.auto_bounds_valid = 0;
+    out.auto_total_range_deg = 0.0f;
+    out.auto_left_backoff_deg = 0.0f;
+    out.auto_right_backoff_deg = 0.0f;
+
+    if (len >= CONFIG_EXTENDED_V3_SIZE_) {
+        // v3: offset 34 = manual_bounds_valid(1) + total(4) + left(4) + right(4)
+        //     offset 47 = auto_bounds_valid(1) + total(4) + left(4) + right(4)
+        out.manual_bounds_valid = payload[34];
+        std::memcpy(&out.manual_total_range_deg, payload + 35, 4);
+        std::memcpy(&out.manual_left_backoff_deg, payload + 39, 4);
+        std::memcpy(&out.manual_right_backoff_deg, payload + 43, 4);
+        out.auto_bounds_valid = payload[47];
+        std::memcpy(&out.auto_total_range_deg, payload + 48, 4);
+        std::memcpy(&out.auto_left_backoff_deg, payload + 52, 4);
+        std::memcpy(&out.auto_right_backoff_deg, payload + 56, 4);
     }
     return true;
 }

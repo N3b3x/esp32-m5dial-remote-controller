@@ -45,6 +45,16 @@ static void applyConfigToSettings_(Settings& s, const fatigue_proto::ConfigPaylo
     s.test_unit.stallguard_sgt = c.stallguard_sgt;
     s.test_unit.stall_detection_current_factor = c.stall_detection_current_factor;
     s.test_unit.bounds_search_accel_rev_s2 = c.bounds_search_accel_rev_s2;
+
+    // v3: bounds data from unit (source of truth)
+    s.manual_bounds.valid = (c.manual_bounds_valid != 0);
+    s.manual_bounds.total_range_deg = c.manual_total_range_deg;
+    s.manual_bounds.left_backoff_deg = c.manual_left_backoff_deg;
+    s.manual_bounds.right_backoff_deg = c.manual_right_backoff_deg;
+    s.auto_bounds.valid = (c.auto_bounds_valid != 0);
+    s.auto_bounds.total_range_deg = c.auto_total_range_deg;
+    s.auto_bounds.left_backoff_deg = c.auto_left_backoff_deg;
+    s.auto_bounds.right_backoff_deg = c.auto_right_backoff_deg;
 }
 }
 
@@ -350,8 +360,11 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
 
                     // If motor power has been disabled (or bounds expired), previously found bounds
                     // must not be shown as valid. Clear cached bounds results so the UI forces a re-find.
+                    // EXCEPTION: If the user is actively viewing the Bounds page in Complete state,
+                    // let them continue viewing the just-found results until they navigate away.
                     if (status.bounds_valid == 0) {
-                        if (bounds_have_result_ || bounds_state_ == BoundsState::Complete) {
+                        const bool viewing_completed_bounds = (page_ == Page::Bounds) && (bounds_state_ == BoundsState::Complete);
+                        if ((bounds_have_result_ || bounds_state_ == BoundsState::Complete) && !viewing_completed_bounds) {
                             boundsResetResult_();
                             bounds_state_ = BoundsState::Idle;
                             bounds_state_since_ms_ = now_ms;
@@ -381,14 +394,37 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                 if (fatigue_proto::ParseConfig(evt.payload, evt.payload_len, cfg)) {
                     last_remote_config_ = cfg;
                     have_remote_config_ = true;
-                      logf_(now_ms, "RX: ConfigResponse cycles=%" PRIu32 " VMAX=%.1f AMAX=%.1f dwell=%.2fs",
+                    logf_(now_ms, "RX: ConfigResponse cycles=%" PRIu32 " VMAX=%.1f AMAX=%.1f dwell=%.2fs",
                           cfg.cycle_amount, cfg.oscillation_vmax_rpm, cfg.oscillation_amax_rev_s2,
                           static_cast<double>(cfg.dwell_time_ms) / 1000.0);
+                    logf_(now_ms, "RX: ConfigResponse bounds: manual=%u (range=%.1f) auto=%u (range=%.1f)",
+                          cfg.manual_bounds_valid, cfg.manual_total_range_deg,
+                          cfg.auto_bounds_valid, cfg.auto_total_range_deg);
 
                     // Apply the received config into our local Settings so the Settings menu
                     // reflects the device state (including StallGuard fields).
                     if (settings_ != nullptr) {
                         applyConfigToSettings_(*settings_, cfg);
+
+                        // Refresh bounds cache from unit (source of truth)
+                        if (settings_->manual_bounds.valid) {
+                            cached_manual_total_range_deg_ = settings_->manual_bounds.total_range_deg;
+                            cached_manual_left_backoff_deg_ = settings_->manual_bounds.left_backoff_deg;
+                            cached_manual_right_backoff_deg_ = settings_->manual_bounds.right_backoff_deg;
+                            manual_bounds_cached_ = true;
+                        } else {
+                            manual_bounds_cached_ = false;
+                        }
+                        if (settings_->auto_bounds.valid) {
+                            cached_auto_total_range_deg_ = settings_->auto_bounds.total_range_deg;
+                            cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
+                            cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+                            auto_bounds_cached_ = true;
+                        } else {
+                            auto_bounds_cached_ = false;
+                        }
+                        logf_(now_ms, "Bounds cache updated: manual=%u auto=%u",
+                              manual_bounds_cached_ ? 1 : 0, auto_bounds_cached_ ? 1 : 0);
                     }
 
                     // On (re)connect, always resync the Settings editor state from the machine.
@@ -492,18 +528,17 @@ void ui::UiController::handleProtoEvents_(uint32_t now_ms) noexcept
                         bounds_state_since_ms_ = now_ms;
                         dirty_ = true;
 
-                        // Save auto bounds to NVS when complete + valid
-                        if (bounds_have_result_ && !bounds_cancelled_ && settings_ != nullptr) {
+                        // Update RAM cache for bounds display. ESP32 unit persists
+                        // these to its own NVS — M5Dial is just a client.
+                        if (bounds_have_result_ && !bounds_cancelled_) {
                             const float auto_range = bounds_global_max_deg_ - bounds_global_min_deg_;
-                            settings_->auto_bounds.valid = true;
-                            settings_->auto_bounds.total_range_deg = auto_range;
-                            // Backoffs already set from settings menu (keep current values)
-                            SettingsStore::Save(*settings_);
                             cached_auto_total_range_deg_ = auto_range;
-                            cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
-                            cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+                            if (settings_ != nullptr) {
+                                cached_auto_left_backoff_deg_ = settings_->auto_bounds.left_backoff_deg;
+                                cached_auto_right_backoff_deg_ = settings_->auto_bounds.right_backoff_deg;
+                            }
                             auto_bounds_cached_ = true;
-                            ESP_LOGI(TAG_, "Auto bounds saved: range=%.1f L=%.1f R=%.1f",
+                            ESP_LOGI(TAG_, "Auto bounds cache updated: range=%.1f L=%.1f R=%.1f",
                                      auto_range,
                                      cached_auto_left_backoff_deg_,
                                      cached_auto_right_backoff_deg_);
@@ -692,24 +727,21 @@ void ui::UiController::handleInputs_(uint32_t now_ms) noexcept
             }
             // ManualStartPlace: long-press cancels back to Landing
             if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
-                live_popup_mode_ = LivePopupMode::None;
-                page_ = Page::Landing;
+                cancelLiveStartFlow_(now_ms);
                 playBeep_(0);
                 dirty_ = true;
                 return;
             }
             // ManualStartChoice: long-press cancels back to Landing
             if (live_popup_mode_ == LivePopupMode::ManualStartChoice) {
-                live_popup_mode_ = LivePopupMode::None;
-                page_ = Page::Landing;
+                cancelLiveStartFlow_(now_ms);
                 playBeep_(0);
                 dirty_ = true;
                 return;
             }
             // ManualRealignConfirm: long-press cancels back to Landing
             if (live_popup_mode_ == LivePopupMode::ManualRealignConfirm) {
-                live_popup_mode_ = LivePopupMode::None;
-                page_ = Page::Landing;
+                cancelLiveStartFlow_(now_ms);
                 playBeep_(0);
                 dirty_ = true;
                 return;
@@ -841,7 +873,7 @@ void ui::UiController::onRotate_(int delta, uint32_t now_ms) noexcept
         if (settings_index_ > 0) {
             switch (settings_category_) {
                 case SettingsCategory::FatigueTest: settings_last_fatigue_index_ = settings_index_; break;
-                case SettingsCategory::BoundsFinding: settings_last_bounds_index_ = settings_index_; break;
+                case SettingsCategory::AutoAlign: settings_last_bounds_index_ = settings_index_; break;
                 case SettingsCategory::ManualAlign: settings_last_manual_align_index_ = settings_index_; break;
                 case SettingsCategory::UI: settings_last_ui_index_ = settings_index_; break;
                 case SettingsCategory::Main: break;
@@ -1111,7 +1143,7 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             settings_return_main_index_ = settings_index_;
             switch (settings_index_) {
                 case 1: settings_category_ = SettingsCategory::FatigueTest; break;
-                case 2: settings_category_ = SettingsCategory::BoundsFinding; break;
+                case 2: settings_category_ = SettingsCategory::AutoAlign; break;
                 case 3: settings_category_ = SettingsCategory::ManualAlign; break;
                 case 4: settings_category_ = SettingsCategory::UI; break;
                 default: break;
@@ -1119,7 +1151,7 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             // Restore last selection inside the submenu (avoid jumping to "< Back").
             switch (settings_category_) {
                 case SettingsCategory::FatigueTest: settings_index_ = std::max(1, settings_last_fatigue_index_); break;
-                case SettingsCategory::BoundsFinding: settings_index_ = std::max(1, settings_last_bounds_index_); break;
+                case SettingsCategory::AutoAlign: settings_index_ = std::max(1, settings_last_bounds_index_); break;
                 case SettingsCategory::ManualAlign: settings_index_ = std::max(1, settings_last_manual_align_index_); break;
                 case SettingsCategory::UI: settings_index_ = std::max(1, settings_last_ui_index_); break;
                 default: settings_index_ = 1; break;
@@ -1304,20 +1336,28 @@ void ui::UiController::onClick_(uint32_t now_ms) noexcept
             case fatigue_proto::TestState::Idle:
             case fatigue_proto::TestState::Completed:
             case fatigue_proto::TestState::Error:
-                if ((manual_bounds_cached_ || auto_bounds_cached_) && 
-                    have_status_ && last_status_.bounds_valid == 0) {
-                    // Cached bounds (manual or auto) + ESP32 bounds invalid →
-                    // Go straight to placement screen (unified flow for restart)
-                    // Put ESP32 into MANUAL_BOUNDS state so ManualBoundsArmPlaced will work
+                // If we haven't received config yet (just reconnected), don't show NoBounds error.
+                // Wait for ConfigResponse which will set the cached bounds flags.
+                if (!have_remote_config_) {
+                    logf_(now_ms, "UI: Start pressed but config not yet received - waiting for resync");
+                    break;
+                }
+                // Check if we have cached bounds (either manual or auto)
+                if (!manual_bounds_cached_ && !auto_bounds_cached_) {
+                    // No cached bounds - cannot start test, show error
+                    live_popup_mode_ = LivePopupMode::NoBounds;
+                    live_popup_selection_ = 0;
+                    logf_(now_ms, "Cannot start: no cached bounds (manual=%u auto=%u) - unit may need bounds re-finding",
+                          manual_bounds_cached_ ? 1 : 0, auto_bounds_cached_ ? 1 : 0);
+                } else {
+                    // Have cached bounds → Always go through alignment flow
+                    // This ensures consistent starting position after motor was disabled
                     (void)espnow::SendCommand(
                         fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
                         static_cast<uint8_t>(fatigue_proto::CommandId::ManualBoundsStart),
                         nullptr, 0);
-                    logf_(now_ms, "TX: ManualBoundsStart (unified restart)");
+                    logf_(now_ms, "TX: ManualBoundsStart (alignment before test)");
                     live_popup_mode_ = LivePopupMode::ManualStartPlace;
-                } else {
-                    live_popup_mode_ = LivePopupMode::StartConfirm;
-                    live_popup_selection_ = 1; // Default to START
                 }
                 break;
             case fatigue_proto::TestState::Running:
@@ -1347,6 +1387,8 @@ void ui::UiController::onTouchClick_(int16_t x, int16_t y, uint32_t now_ms) noex
             // Special case: settings back should discard edits.
             if (page_ == Page::Settings) {
                 settingsBack_();
+            } else if (page_ == Page::LiveCounter && isLiveStartFlowActive_()) {
+                cancelLiveStartFlow_(now_ms);
             } else {
                 if (page_ == Page::ManualBounds) {
                     sendManualBoundsCancel_();
@@ -1477,6 +1519,8 @@ void ui::UiController::onSwipe_(int16_t dx, int16_t dy, uint32_t now_ms) noexcep
         playBeep_(2);
         if (page_ == Page::Settings) {
             settingsBack_();
+        } else if (page_ == Page::LiveCounter && isLiveStartFlowActive_()) {
+            cancelLiveStartFlow_(now_ms);
         } else {
             page_ = Page::Landing;
         }
@@ -1489,6 +1533,8 @@ void ui::UiController::onSwipe_(int16_t dx, int16_t dy, uint32_t now_ms) noexcep
         playBeep_(2);
         if (page_ == Page::Settings) {
             settingsBack_();
+        } else if (page_ == Page::LiveCounter && isLiveStartFlowActive_()) {
+            cancelLiveStartFlow_(now_ms);
         } else {
             page_ = Page::Landing;
         }
@@ -1532,9 +1578,9 @@ void ui::UiController::enterSettings_() noexcept
 int ui::UiController::getSettingsItemCount_() const noexcept
 {
     switch (settings_category_) {
-        case SettingsCategory::Main: return 5;             // Back, Fatigue Test, Bounds Finding, Manual Align, UI Settings
+        case SettingsCategory::Main: return 5;             // Back, Fatigue Test, Auto Align, Manual Align, UI Settings
         case SettingsCategory::FatigueTest: return 5;     // Back, Cycles, VMAX, AMAX, Dwell
-        case SettingsCategory::BoundsFinding: return 9;   // Back + 6 existing + Auto L-Backoff + Auto R-Backoff
+        case SettingsCategory::AutoAlign: return 10;      // Back + 6 auto params + Total Range + L-Backoff + R-Backoff
         case SettingsCategory::ManualAlign: return 4;     // Back, Total Range, Left Backoff, Right Backoff
         case SettingsCategory::UI: return 2;              // Back, Brightness
         default: return 5;
@@ -1688,7 +1734,7 @@ void ui::UiController::applySettingsEditorValue_() noexcept
             }
             break;
 
-        case SettingsCategory::BoundsFinding:
+        case SettingsCategory::AutoAlign:
             if (settings_editor_index_ == 1 && settings_editor_type_ == SettingsEditorValueType::Bool) {
                 edit_settings_.test_unit.bounds_method_stallguard = settings_editor_bool_new_;
                 settings_dirty_ = true;
@@ -1709,9 +1755,12 @@ void ui::UiController::applySettingsEditorValue_() noexcept
                     edit_settings_.test_unit.bounds_search_accel_rev_s2 = std::max(0.0f, settings_editor_f32_new_);
                     settings_dirty_ = true;
                 } else if (settings_editor_index_ == 7) {
-                    edit_settings_.auto_bounds.left_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    edit_settings_.auto_bounds.total_range_deg = std::max(0.0f, settings_editor_f32_new_);
                     settings_dirty_ = true;
                 } else if (settings_editor_index_ == 8) {
+                    edit_settings_.auto_bounds.left_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
+                    settings_dirty_ = true;
+                } else if (settings_editor_index_ == 9) {
                     edit_settings_.auto_bounds.right_backoff_deg = std::max(0.0f, settings_editor_f32_new_);
                     settings_dirty_ = true;
                 }
@@ -1793,8 +1842,11 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
             }
             break;
 
-        case SettingsCategory::BoundsFinding:
-            if (settings_index_ == 1) {
+        case SettingsCategory::AutoAlign:
+            // Indices 7-9 require valid auto bounds to edit
+            if (settings_index_ >= 7 && !edit_settings_.auto_bounds.valid) {
+                settings_editor_type_ = SettingsEditorValueType::None;
+            } else if (settings_index_ == 1) {
                 settings_editor_type_ = SettingsEditorValueType::Bool;
                 settings_editor_bool_old_ = edit_settings_.test_unit.bounds_method_stallguard;
                 settings_editor_bool_new_ = settings_editor_bool_old_;
@@ -1813,8 +1865,10 @@ void ui::UiController::beginSettingsValueEditor_() noexcept
                 } else if (settings_index_ == 6) {
                     settings_editor_f32_old_ = round1(edit_settings_.test_unit.bounds_search_accel_rev_s2);
                 } else if (settings_index_ == 7) {
-                    settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.left_backoff_deg);
+                    settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.total_range_deg);
                 } else if (settings_index_ == 8) {
+                    settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.left_backoff_deg);
+                } else if (settings_index_ == 9) {
                     settings_editor_f32_old_ = round1(edit_settings_.auto_bounds.right_backoff_deg);
                 } else {
                     settings_editor_f32_old_ = 0.0f;
@@ -2587,18 +2641,18 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
     const char* title = "SETTINGS";
     
     // Array to store labels and values
-    const char* labels[10]{};
-    char values[10][24]{};
+    const char* labels[11]{};
+    char values[11][24]{};
     
     // Main menu labels
-    static const char* main_labels[] = {"< Back", "Fatigue Test", "Bounds Finding", "Manual Align", "UI Settings"};
-    static const char* main_values[] = {"Return to home", "Motion settings", "Stall detection", "Cached bounds", "Display options"};
+    static const char* main_labels[] = {"< Back", "Fatigue Test", "Auto Align", "Manual Align", "UI Settings"};
+    static const char* main_values[] = {"Return to home", "Motion settings", "Auto bounds params", "Cached bounds", "Display options"};
     
     // Fatigue Test labels - PROTOCOL V2: velocity/acceleration control
     static const char* fatigue_labels[] = {"< Back", "Cycles", "VMAX (RPM)", kLabelAmaxRevPerS2Ui, "Dwell (s)"};
     
-    // Bounds Finding labels (now includes auto backoffs)
-    static const char* bounds_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "SGT", "Stall Factor", "Search Accel", "Auto L-Backoff", "Auto R-Backoff"};
+    // Auto Align labels: auto params + cached auto bounds
+    static const char* auto_align_labels[] = {"< Back", "Mode", "Search Speed", "SG Min Vel", "SGT", "Stall Factor", "Search Accel", "Total Range", "Left Backoff", "Right Backoff"};
     
     // Manual Align labels
     static const char* manual_align_labels[] = {"< Back", "Total Range", "Left Backoff", "Right Backoff"};
@@ -2631,10 +2685,10 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             }
             break;
             
-        case SettingsCategory::BoundsFinding:
-            title = "BOUNDS";
-            item_count = 9;
-            for (int i = 0; i < item_count; ++i) labels[i] = bounds_labels[i];
+        case SettingsCategory::AutoAlign:
+            title = "AUTO ALIGN";
+            item_count = 10;
+            for (int i = 0; i < item_count; ++i) labels[i] = auto_align_labels[i];
             snprintf(values[0], sizeof(values[0]), "Back to settings");
             snprintf(values[1], sizeof(values[1]), "%s", edit_settings_.test_unit.bounds_method_stallguard ? "StallGuard" : "Encoder");
             snprintf(values[2], sizeof(values[2]), "%.1f rpm", static_cast<double>(edit_settings_.test_unit.bounds_search_velocity_rpm));
@@ -2646,8 +2700,16 @@ void ui::UiController::drawSettings_(uint32_t now_ms) noexcept
             }
             snprintf(values[5], sizeof(values[5]), "%.1fx", static_cast<double>(edit_settings_.test_unit.stall_detection_current_factor));
             snprintf(values[6], sizeof(values[6]), "%.1f %s", static_cast<double>(edit_settings_.test_unit.bounds_search_accel_rev_s2), kUnitRevPerS2Ui);
-            snprintf(values[7], sizeof(values[7]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.left_backoff_deg));
-            snprintf(values[8], sizeof(values[8]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.right_backoff_deg));
+            // Cached auto bounds values (indices 7-9)
+            if (edit_settings_.auto_bounds.valid) {
+                snprintf(values[7], sizeof(values[7]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.total_range_deg));
+                snprintf(values[8], sizeof(values[8]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.left_backoff_deg));
+                snprintf(values[9], sizeof(values[9]), "%.1f deg", static_cast<double>(edit_settings_.auto_bounds.right_backoff_deg));
+            } else {
+                snprintf(values[7], sizeof(values[7]), "Not set");
+                snprintf(values[8], sizeof(values[8]), "Not set");
+                snprintf(values[9], sizeof(values[9]), "Not set");
+            }
             break;
             
         case SettingsCategory::ManualAlign:
@@ -2818,15 +2880,16 @@ void ui::UiController::drawSettingsValueEditor_(uint32_t now_ms) noexcept
             else if (settings_editor_index_ == 3) { label = "AMAX"; unit = kUnitRevPerS2Ui; unit_is_rev_per_s2 = true; }
             else if (settings_editor_index_ == 4) { label = "Dwell"; unit = "s"; }
             break;
-        case SettingsCategory::BoundsFinding:
+        case SettingsCategory::AutoAlign:
             if (settings_editor_index_ == 1) { label = "Mode"; bool_is_mode = true; }
             else if (settings_editor_index_ == 2) { label = "Search Speed"; unit = "rpm"; }
             else if (settings_editor_index_ == 3) { label = "SG Min Vel"; unit = "rpm"; }
             else if (settings_editor_index_ == 4) { label = "SGT"; }
             else if (settings_editor_index_ == 5) { label = "Stall Factor"; unit = "x"; }
             else if (settings_editor_index_ == 6) { label = "Search Accel"; unit = kUnitRevPerS2Ui; unit_is_rev_per_s2 = true; }
-            else if (settings_editor_index_ == 7) { label = "Auto L-Backoff"; unit = "deg"; }
-            else if (settings_editor_index_ == 8) { label = "Auto R-Backoff"; unit = "deg"; }
+            else if (settings_editor_index_ == 7) { label = "Total Range"; unit = "deg"; }
+            else if (settings_editor_index_ == 8) { label = "Left Backoff"; unit = "deg"; }
+            else if (settings_editor_index_ == 9) { label = "Right Backoff"; unit = "deg"; }
             break;
         case SettingsCategory::ManualAlign:
             if (settings_editor_index_ == 1) { label = "Total Range"; unit = "deg"; }
@@ -3143,13 +3206,13 @@ void ui::UiController::drawSettingsPopup_(uint32_t now_ms) noexcept
                 else if (settings_editor_index_ == 3) { unit = kUnitRevPerS2Ui; }
                 else if (settings_editor_index_ == 4) { unit = "s"; }
                 break;
-            case SettingsCategory::BoundsFinding:
+            case SettingsCategory::AutoAlign:
                 if (settings_editor_index_ == 1) { bool_is_mode = true; }
                 else if (settings_editor_index_ == 2) { unit = "rpm"; }
                 else if (settings_editor_index_ == 3) { unit = "rpm"; }
                 else if (settings_editor_index_ == 5) { unit = "x"; }
                 else if (settings_editor_index_ == 6) { unit = kUnitRevPerS2Ui; }
-                else if (settings_editor_index_ == 7 || settings_editor_index_ == 8) { unit = "deg"; }
+                else if (settings_editor_index_ >= 7 && settings_editor_index_ <= 9) { unit = "deg"; }
                 break;
             case SettingsCategory::ManualAlign:
                 unit = "deg";
@@ -3419,6 +3482,33 @@ void ui::UiController::sendManualBoundsCancel_() noexcept
         nullptr, 0);
 }
 
+bool ui::UiController::isLiveStartFlowActive_() const noexcept
+{
+    return live_popup_mode_ == LivePopupMode::BoundsChoice ||
+           live_popup_mode_ == LivePopupMode::ManualStartPlace ||
+           live_popup_mode_ == LivePopupMode::ManualStartChoice ||
+           live_popup_mode_ == LivePopupMode::ManualRealign ||
+           live_popup_mode_ == LivePopupMode::ManualRealignConfirm;
+}
+
+void ui::UiController::cancelLiveStartFlow_(uint32_t now_ms) noexcept
+{
+    const bool ok = espnow::SendCommand(
+        fatigue_proto::DEVICE_ID_FATIGUE_TESTER_,
+        static_cast<uint8_t>(fatigue_proto::CommandId::Stop),
+        nullptr,
+        0);
+    if (ok) {
+        pending_command_id_ = 4;
+        pending_command_tick_ = now_ms;
+        logf_(now_ms, "TX: Stop cmd (cancel live start flow)");
+    } else {
+        logf_(now_ms, "TX: Stop cmd FAILED (cancel live start flow)");
+    }
+    live_popup_mode_ = LivePopupMode::None;
+    page_ = Page::Landing;
+}
+
 void ui::UiController::resetManualBoundsWizard_() noexcept
 {
     manual_bounds_step_ = ManualBoundsStep::StartPrompt;
@@ -3523,14 +3613,12 @@ void ui::UiController::handleManualBoundsPopupInput_(int delta, bool click, uint
             cached_manual_right_backoff_deg_ = manual_bounds_right_backoff_deg_;
             manual_bounds_cached_ = true;
 
-            // Persist manual bounds to NVS
+            // Update local settings cache (ESP32 unit persists to its NVS)
             if (settings_ != nullptr) {
                 settings_->manual_bounds.valid = true;
                 settings_->manual_bounds.total_range_deg = cached_manual_total_range_deg_;
                 settings_->manual_bounds.left_backoff_deg = cached_manual_left_backoff_deg_;
                 settings_->manual_bounds.right_backoff_deg = cached_manual_right_backoff_deg_;
-                (void)SettingsStore::Save(*settings_);
-                logf_(now_ms, "Manual bounds saved to NVS");
             }
 
             struct { float total_range; float left_backoff; float right_backoff; } payload;
@@ -4429,6 +4517,35 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
     const int16_t cx = 240 / 2;
     const int16_t cy = 240 / 2;
     
+    // ── NoBounds: error popup — cannot start without bounds ────────────────
+    if (live_popup_mode_ == LivePopupMode::NoBounds) {
+        const int16_t popup_w = 200;
+        const int16_t popup_h = 120;
+        const int16_t popup_x = static_cast<int16_t>(cx - popup_w / 2);
+        const int16_t popup_y = static_cast<int16_t>(cy - popup_h / 2);
+
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, 0x2104, true);
+        drawRoundedRect_(popup_x, popup_y, popup_w, popup_h, 12, colors::accent_red, false);
+
+        // Title
+        canvas_->setTextSize(2);
+        canvas_->setTextDatum(textdatum_t::top_center);
+        canvas_->setTextColor(colors::accent_red);
+        canvas_->drawString("NO BOUNDS", cx, static_cast<int16_t>(popup_y + 14));
+
+        // Message
+        canvas_->setTextSize(1);
+        canvas_->setTextColor(colors::text_secondary);
+        canvas_->drawString("Cannot start test.", cx, static_cast<int16_t>(popup_y + 48));
+        canvas_->drawString("Run Find Bounds or", cx, static_cast<int16_t>(popup_y + 64));
+        canvas_->drawString("Manual Bounds first.", cx, static_cast<int16_t>(popup_y + 80));
+
+        // Dismiss hint
+        canvas_->setTextColor(colors::text_hint);
+        canvas_->drawString("[Press] OK", cx, static_cast<int16_t>(popup_y + 102));
+        return;
+    }
+
     // ── ManualStartPlace: full-screen — place arm at left stop ─────────────
     if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
         // Dark overlay
@@ -4702,6 +4819,17 @@ void ui::UiController::drawLivePopup_(uint32_t now_ms) noexcept
 
 void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now_ms) noexcept
 {
+    (void)delta;  // May be unused for some popups
+    
+    // NoBounds: click to dismiss (cannot start test without bounds)
+    if (live_popup_mode_ == LivePopupMode::NoBounds) {
+        if (!click) return;
+        playBeep_(2);
+        live_popup_mode_ = LivePopupMode::None;
+        dirty_ = true;
+        return;
+    }
+
     // ManualStartPlace: press → transition to ManualStartChoice
     // (ManualBoundsStart already sent by the unified restart flow or original BoundsChoice path)
     if (live_popup_mode_ == LivePopupMode::ManualStartPlace) {
@@ -4767,8 +4895,7 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
             live_popup_mode_ = LivePopupMode::ManualRealign;
         } else {
             // Cancel → exit back to landing page
-            live_popup_mode_ = LivePopupMode::None;
-            page_ = Page::Landing;
+            cancelLiveStartFlow_(now_ms);
         }
         dirty_ = true;
         return;
@@ -4833,8 +4960,7 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
             live_popup_mode_ = LivePopupMode::ManualRealign;
         } else {
             // Cancel → exit back to landing page
-            live_popup_mode_ = LivePopupMode::None;
-            page_ = Page::Landing;
+            cancelLiveStartFlow_(now_ms);
         }
         dirty_ = true;
         return;
@@ -4885,7 +5011,7 @@ void ui::UiController::handleLivePopupInput_(int delta, bool click, uint32_t now
         } else if (live_popup_mode_ == LivePopupMode::BoundsChoice) {
             if (live_popup_selection_ == 0) {
                 // Cancel
-                live_popup_mode_ = LivePopupMode::None;
+                cancelLiveStartFlow_(now_ms);
             } else if (live_popup_selection_ == 1) {
                 // Use Manual — send ManualBoundsStart, then show placement screen
                 (void)espnow::SendCommand(

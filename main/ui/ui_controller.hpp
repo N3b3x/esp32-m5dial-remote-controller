@@ -91,9 +91,9 @@ private:
 
     // Settings menu category/layer
     enum class SettingsCategory : uint8_t {
-        Main = 0,       // Top-level: Fatigue Test, Bounds Finding, Manual Align, UI
+        Main = 0,       // Top-level: Fatigue Test, Auto Align, Manual Align, UI
         FatigueTest,    // Cycles, VMAX/AMAX, Dwell
-        BoundsFinding,  // Mode, Search Speed, SG Min Vel, Stall Factor, Search Accel, Auto Backoffs
+        AutoAlign,      // Auto align params + cached auto bounds: Total Range, L/R Backoffs
         ManualAlign,    // Manual bounds: Total Range, Left Backoff, Right Backoff
         UI              // Brightness
     };
@@ -271,6 +271,7 @@ private:
     enum class LiveFocus : uint8_t { Actions = 0, Back = 1 };
     enum class LivePopupMode : uint8_t {
         None = 0,
+        NoBounds,           // Error: no cached bounds, cannot start test
         StartConfirm,       // Idle state: CANCEL / START (no prior manual bounds)
         BoundsChoice,       // Idle state: CANCEL / USE MANUAL / AUTO FIND
         ManualStartPlace,   // Place armature at left stop (press to continue, hold to cancel)
@@ -402,6 +403,8 @@ private:
     void drawLiveCounter_(uint32_t now_ms) noexcept;
     void drawLivePopup_(uint32_t now_ms) noexcept;
     void handleLivePopupInput_(int delta, bool click, uint32_t now_ms) noexcept;
+    bool isLiveStartFlowActive_() const noexcept;
+    void cancelLiveStartFlow_(uint32_t now_ms) noexcept;
     void drawTerminal_(uint32_t now_ms) noexcept;
     
     // Quick Settings helpers (long-press during Running/Paused)
